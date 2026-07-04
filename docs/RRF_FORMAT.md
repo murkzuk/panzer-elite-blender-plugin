@@ -149,3 +149,12 @@ for X, one for Y (`x = (field >> 16) & 0xFF`, `y = (field >> 24) & 0xFF`). Corne
 Combined with the resolved library entry's atlas position (see
 [TLB_FORMAT.md](TLB_FORMAT.md)), this gives a full UV mapping into the shared texture
 atlas with no cropping or per-part image needed.
+
+**A face whose corner bytes are all literally `(0,0)` was never individually cropped in
+the original tool at all — it's not a genuine "crop to a single pixel" choice.**
+Confirmed on real content: an entire building model had every single one of its
+resolved faces at exactly `(0,0,0,0)`, too systematic to be a one-off. Treating this
+literally (sampling one atlas pixel for the whole face) produces a flat, blocky,
+stretched-looking result instead of the real texture. The correct fallback is to use the
+assigned entry's **full rectangle** instead, with the same corner-role order above:
+`v1=(sizeX-1,0)`, `v2=(0,0)`, `v3=(0,sizeY-1)`, `textureHalf=(sizeX-1,sizeY-1)`.
