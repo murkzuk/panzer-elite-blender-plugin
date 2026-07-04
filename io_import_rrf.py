@@ -329,6 +329,61 @@ def read_rrf(filepath):
     return parts
 
 
+def _bbox(vertices):
+    xs = [v[0] for v in vertices]
+    ys = [v[1] for v in vertices]
+    zs = [v[2] for v in vertices]
+    return (min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs))
+
+
+def _bbox_overshoot(bbox_min, bbox_max, ref_min, ref_max):
+    """How far (bbox_min, bbox_max) sticks out past the reference box, summed over axes -
+    0 if it's fully nested inside, growing with how far outside it extends."""
+    total = 0.0
+    for i in range(3):
+        total += max(0.0, ref_min[i] - bbox_min[i])
+        total += max(0.0, bbox_max[i] - ref_max[i])
+    return total
+
+
+def detect_add_pivot_convention(parts):
+    """Two different vertex conventions show up in real shipped .RRF files, and there's no
+    flag in the format that says which one a given file uses:
+
+    - vehicles (tanks etc.): each part's raw vertices are already in one shared/assembled
+      coordinate frame - world position = raw vertex, unmodified (confirmed against real
+      Tiger/Panzer IV/Panther models, screenshots looked correct).
+    - at least some static props/scenery (e.g. a horse-drawn cart): each part's raw
+      vertices are local to that part and need its own pivot added back -
+      world position = raw vertex + pivot. Assuming "world = raw" for these produces
+      wildly wrong results - parts land far outside the model's own bounding box (a cart
+      wheel ending up 75 units away from the cart bed, for a ~30-unit-tall model).
+
+    Auto-detect per model: try both conventions on every non-root part and see which one
+    keeps parts nested inside (or close to) the root part's own bounding box - the wrong
+    convention overshoots it dramatically, the right one doesn't.
+    """
+    root = parts[0] if parts else None
+    if root is None or not root.vertices:
+        return False
+
+    ref_min, ref_max = _bbox(root.vertices)
+
+    raw_overshoot = 0.0
+    added_overshoot = 0.0
+    for part in parts[1:]:
+        if not part.vertices:
+            continue
+        raw_min, raw_max = _bbox(part.vertices)
+        px, py, pz = part.pivot
+        added_min = (raw_min[0] + px, raw_min[1] + py, raw_min[2] + pz)
+        added_max = (raw_max[0] + px, raw_max[1] + py, raw_max[2] + pz)
+        raw_overshoot += _bbox_overshoot(raw_min, raw_max, ref_min, ref_max)
+        added_overshoot += _bbox_overshoot(added_min, added_max, ref_min, ref_max)
+
+    return added_overshoot < raw_overshoot
+
+
 def _build_material(root_name, image_path):
     image = bpy.data.images.load(image_path, check_existing=True)
     material = bpy.data.materials.new(root_name + "_mat")
@@ -406,6 +461,13 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None):
     resolved_count = 0
     unresolved_count = 0
 
+    # Two different vertex conventions show up in real shipped .RRF files - see
+    # detect_add_pivot_convention() for the full explanation. Vehicles: raw vertices are
+    # already in one shared/assembled frame, no pivot correction needed. Some static
+    # props/scenery: raw vertices are part-local and need their own pivot added back.
+    # Root never needs this (there's nothing to nest it inside) - only non-root parts.
+    add_pivot_convention = detect_add_pivot_convention(parts)
+
     objects = []
     for part in parts:
         type_id = part.obj_attribut & 0xFF
@@ -413,13 +475,13 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None):
 
         if part.faces:
             mesh = bpy.data.meshes.new(part.name)
-            # Confirmed empirically: every part's raw vertices are already centered on
-            # that part's own local origin (bounding boxes are symmetric around 0,0,0
-            # independent of pivot), so we offset by pivot purely to place the object's
-            # origin at the pivot point for correct future rotation - the mesh itself
-            # needs no other correction.
             px, py, pz = part.pivot
-            local_verts = [(vx - px, vy - py, vz - pz) for vx, vy, vz in part.vertices]
+            if add_pivot_convention and part.parent_no is not None:
+                # Object origin still goes at the pivot (below), so keep vertices
+                # part-local relative to it - equivalent to "world = raw + pivot".
+                local_verts = list(part.vertices)
+            else:
+                local_verts = [(vx - px, vy - py, vz - pz) for vx, vy, vz in part.vertices]
             mesh.from_pydata(local_verts, [], part.faces)
             mesh.update()
             _recalculate_normals(mesh)
