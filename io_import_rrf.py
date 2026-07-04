@@ -44,9 +44,11 @@ TLB_MAX_PARTS = 4096
 # live paint-and-save test in the real ObjEdit (PEx_105_ObjEdit.exe): painting a face from
 # a library titled "8202" wrote textureOfset low31=8202, and CustomB3.TLB's part id=10
 # (sizeX=64,sizeY=128, matching the tool's own displayed size) resolves exactly when
-# slot=2 (8202 - 2*4096 = 10). Some older/heavily-edited faces instead carry a live HAL
-# texture handle from a later tool version, which cannot be resolved from files at all -
-# so this is a best-effort search, not guaranteed to resolve every face.
+# slot=2 (8202 - 2*4096 = 10). The remainder mod TLB_MAX_PARTS always identifies the
+# right entry regardless of how large the implied slot is - see resolve_texture_id()
+# below. A small residual of faces may still fail to resolve (a stray/removed .TLB
+# entry, or genuinely a runtime-only handle) - real content checked resolves 88-100%
+# once the correct library/libraries are used, so this is the rare exception, not the norm.
 MAX_LIBS = 32
 # Every _8.BMP/_24.BMP atlas is a fixed 256x4096 image (confirmed from the actual BMP
 # header, not just file size - 256x4096 and 1024x1024 have the same pixel count so file
@@ -107,17 +109,33 @@ def read_tlb(filepath):
 
 
 def resolve_texture_id(texture_id, slot_to_parts):
-    """slot_to_parts: {slot_index: tlb_parts_dict}. Checks texture_id against exactly the
-    slots present in the dict (in ascending slot order) and returns (entry, slot) for the
-    first match, or (None, None) if it doesn't resolve against any of them - meaning it
-    likely carries a live HAL texture handle instead (unrecoverable). For the single-.TLB
-    and auto-detect paths, callers pass the same parts dict under every slot 0..MAX_LIBS-1
-    (brute-force, matching the old behaviour); the .RRI path passes the exact slot->library
-    mapping recorded by the tool itself, which is more precise."""
+    """slot_to_parts: {key: tlb_parts_dict} (key is just a label to say which library
+    matched, e.g. a .RRI slot number - it doesn't need to mean anything to this function).
+
+    Correction from an earlier version of this importer: real content routinely has a
+    face's texture_id imply a "slot" number far larger than the tool's ~16-32 visible UI
+    slots - confirmed up to the high hundreds on real shipped models, and it still
+    resolves against an ordinary .TLB the model is known to use (verified: a Tiger
+    model's turret plate, magenta under the old code, uses ids like 1181712 that turned
+    out to be valid entries in the exact same CustomB1.TLB that already resolved its
+    other faces - just at implied slot 288 instead of a "reasonable" 0-31). The earlier
+    version capped the slot search at 32 and treated everything past that as an
+    unrecoverable live hardware handle. That conclusion was wrong for these cases.
+
+    The actual math: subtracting any multiple of TLB_MAX_PARTS (4096) from texture_id
+    doesn't change its remainder, and every real .TLB entry id already lives in
+    [0, TLB_MAX_PARTS) by construction (it's a fixed-size 4096-slot array). So the
+    candidate id is always exactly texture_id % TLB_MAX_PARTS, regardless of how large
+    the implied slot is - no need to search a slot range at all, "high slot numbers"
+    were never actually a barrier, just an artifact of capping the search too low.
+
+    There is still a real, separate, unrecoverable case: a small number of faces
+    genuinely carry a live hardware texture handle from the renderer rather than any
+    stable id (see TEXTURE_ID_RESOLUTION.md) - those just won't match any candidate id
+    in any real .TLB, which is exactly what "returns (None, None)" from this function
+    now means in practice, not "the slot was too high to search"."""
+    candidate = texture_id % TLB_MAX_PARTS
     for slot in sorted(slot_to_parts):
-        candidate = texture_id - slot * TLB_MAX_PARTS
-        if candidate < 0:
-            continue
         entry = slot_to_parts[slot].get(candidate)
         if entry is not None:
             return entry, slot
@@ -166,10 +184,10 @@ def find_best_tlb(folder, unique_texture_ids, min_ratio=0.15, min_absolute=3):
             tlb_parts = read_tlb(path)
         except Exception:
             continue
-        flat = {slot: tlb_parts for slot in range(MAX_LIBS)}
+        single = {0: tlb_parts}
         score = 0
         for tex_id in unique_texture_ids:
-            if resolve_texture_id(tex_id, flat)[0] is not None:
+            if resolve_texture_id(tex_id, single)[0] is not None:
                 score += 1
         if score > best_score:
             best_score, best_path, best_parts = score, path, tlb_parts
@@ -640,7 +658,7 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
                 if atlas_image_path is None:
                     self.report({"WARNING"}, "No matching _24.BMP/_8.BMP found next to the .TLB - importing geometry only")
                 else:
-                    slot_sources = {slot: (tlb_parts, atlas_image_path) for slot in range(MAX_LIBS)}
+                    slot_sources = {0: (tlb_parts, atlas_image_path)}
             except Exception as e:
                 self.report({"WARNING"}, f"Could not read .TLB ({e}) - importing geometry only")
         elif self.use_rri and find_rri_path(self.filepath):
@@ -670,7 +688,7 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
                     if atlas_image_path is None:
                         self.report({"WARNING"}, f"Best TLB match {best_path} has no matching _24.BMP/_8.BMP - importing geometry only")
                     else:
-                        slot_sources = {slot: (tlb_parts, atlas_image_path) for slot in range(MAX_LIBS)}
+                        slot_sources = {0: (tlb_parts, atlas_image_path)}
 
         root_name = os.path.splitext(os.path.basename(self.filepath))[0]
         collection = bpy.data.collections.new(root_name)

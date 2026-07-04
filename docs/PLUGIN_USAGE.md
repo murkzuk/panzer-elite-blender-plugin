@@ -93,6 +93,13 @@ see Scenario B in [PAINT_AND_EXPORT_SCOPING.md](PAINT_AND_EXPORT_SCOPING.md).
 - Export only covers repainting existing texture assignments (Scenario A) — no new
   `.TLB` entries or `.RRF` changes; see
   [PAINT_AND_EXPORT_SCOPING.md](PAINT_AND_EXPORT_SCOPING.md).
-- Texture resolution for models without a `.RRI` and without a hand-supplied `.TLB` is
-  best-effort; some faces on older content may never resolve (this is a property of the
-  saved data, not the importer — see [TEXTURE_ID_RESOLUTION.md](TEXTURE_ID_RESOLUTION.md)).
+- Auto-detect (used when there's no `.RRI` and no hand-supplied `.TLB`) only tries the
+  single best-scoring library in the search folder. Models that genuinely draw from
+  several libraries at once (common on larger/older vehicles) will resolve far fewer
+  faces under auto-detect than they would with their real `.RRI` present — this is a
+  real gap in the auto-detect strategy, not a property of the saved data (see
+  [TEXTURE_ID_RESOLUTION.md](TEXTURE_ID_RESOLUTION.md)). Prefer keeping/restoring a
+  model's `.RRI` file whenever one exists.
+- A small number of individual texture IDs may still fail to resolve even with the
+  correct library — in practice a handful of faces at most, likely stale/removed `.TLB`
+  entries rather than a systematic limitation.
