@@ -523,6 +523,17 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None):
                         resolved_count += 1
                         poly.material_index = material_index_of[material]
                         posX, posY, sizeX, sizeY = entry
+                        # A face that was never individually cropped in the original tool
+                        # has all corners at (0,0) - confirmed on real content (every one
+                        # of a whole building's resolved faces, not just a rare one-off),
+                        # too systematic to be a genuine "crop to one pixel" choice.
+                        # Falls back to the assigned entry's full rectangle instead of
+                        # literally sampling one pixel, using the same per-corner role
+                        # order confirmed via the live paint test (RRF_FORMAT.md): v1=
+                        # top-right, v2=top-left, v3=bottom-left, v4=bottom-right (quads).
+                        if all(c == (0, 0) for c in corners):
+                            full_rect = [(sizeX - 1, 0), (0, 0), (0, sizeY - 1), (sizeX - 1, sizeY - 1)]
+                            corners = full_rect[:len(corners)]
                         for loop_index, (lx, ly) in zip(poly.loop_indices, corners):
                             atlas_x = posX * 16 + lx
                             atlas_y = posY * 16 + ly
