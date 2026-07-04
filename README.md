@@ -30,14 +30,17 @@ built from that documentation.
 
 ## Status
 
-Import is working: geometry, part hierarchy with correct pivots, UVs, and texture
-resolution via a `.RRI` sidecar (when present) or best-effort auto-detection otherwise.
+Import: geometry and part hierarchy with correct pivots are working and verified against
+real models. UV/texture resolution via a `.RRI` sidecar (when present) or best-effort
+auto-detection is largely working, but some texture placement issues are still being
+tracked down.
 
-Export (Scenario A — repainting existing texture assignments) is working: File > Export
-> Panzer Elite Texture Atlas (.bmp) saves a painted-on Image datablock back out as a
-24-bit BMP the game/ObjEdit will load. Verified pixel-exact against a real atlas.
-Scenario B (new texture regions / new `.TLB` entries) is scoped but not built — see the
-scoping doc.
+Export (Scenario A — repainting existing texture assignments): File > Export > Panzer
+Elite Texture Atlas (.bmp) saves a painted-on Image datablock back out as a 24-bit BMP.
+Checked so far only via an automated pixel comparison of the round-tripped file (painted
+regions match, untouched regions match, correct format/size) — **not yet tested by
+loading an export in the real game or ObjEdit.** Scenario B (new texture regions / new
+`.TLB` entries) is scoped but not built — see the scoping doc.
 
 ## Requirements
 

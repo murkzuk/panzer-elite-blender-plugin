@@ -79,9 +79,13 @@ bpy.ops.export_scene.pe_rrf_atlas(filepath=r"...\Texture\CustomB1_24.bmp", image
 This only covers **repainting within the model's existing texture assignments** — no
 `.RRF`/`.TLB` changes, just a replacement 24-bit `.BMP` the game's loader will prefer
 over the paletted `_8.BMP` fallback. Save it as `<name>_24.BMP` next to the `.TLB` for
-the game/ObjEdit to pick it up. Verified pixel-exact: painted regions come through
-correctly, untouched regions are unchanged, output is a standard 24-bit BMP at the
-expected 256×4096 size.
+the game/ObjEdit to pick it up.
+
+**Not yet tested against the real game or ObjEdit.** What's been checked so far is
+limited to an automated pixel comparison of the round-tripped file (painted regions match
+what was painted, untouched regions match the source, output is a standard 24-bit BMP at
+the expected 256×4096 size) — nobody has actually loaded an exported file in ObjEdit or
+the game yet to confirm it's accepted and displays correctly.
 
 Adding brand new texture regions (new UV layout, new `.TLB` entries) isn't supported —
 see Scenario B in [PAINT_AND_EXPORT_SCOPING.md](PAINT_AND_EXPORT_SCOPING.md).
