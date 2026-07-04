@@ -1,6 +1,6 @@
 # Scoping: paint in Blender, export back into a `.TLB`
 
-**Status: scoped, not yet built.**
+**Status: Scenario A is built and verified. Scenario B is scoped, not built.**
 
 ## Can models be painted in Blender's Texture Paint workspace?
 
@@ -31,26 +31,27 @@ to either:
 
 ## Can the plugin export newly-painted textures back into a `.TLB`?
 
-Not yet, but the format is fully understood (see
-[TLB_FORMAT.md](TLB_FORMAT.md)) and writing one is straightforward — it's a small,
-fixed-size binary layout, not a complex format. Two different scenarios, with very
-different amounts of work:
+Yes for Scenario A (built). Not yet for Scenario B. The `.TLB` format itself is fully
+understood (see [TLB_FORMAT.md](TLB_FORMAT.md)) — writing one, if Scenario B is pursued
+later, is a small, fixed-size binary layout, not a complex format.
 
-### Scenario A — repainting within existing texture assignments (straightforward)
+### Scenario A — repainting within existing texture assignments (built)
 
 If the paint session only recolors/reworks pixels within rectangles the model already
 uses (the common "new camouflage/weathering" case), **the `.RRF` doesn't need to
-change at all.** Only the `.TLB`'s companion atlas bitmap needs updating:
+change at all** — realizing this simplified the implementation a lot: the game's own
+loader already prefers a `<name>_24.BMP` next to the `.TLB` over the paletted `_8.BMP`
+fallback, so the export operator doesn't need to touch the `.TLB`'s binary contents at
+all either. It just saves the current (possibly repainted) Image datablock back out as
+a standard 24-bit BMP at the correct `256×4096` size.
 
-1. Read back the current pixel data from Blender's Image datablock for the painted
-   region(s).
-2. Write those pixels into the correct rectangle of the atlas bitmap (`posX×16,
-   posY×16, sizeX, sizeY` from the `.TLB` entry).
-3. Save the updated `_8.BMP`/`_24.BMP` (and re-derive the 8-bit palette version from the
-   24-bit if the artist painted in truecolor).
+`File > Export > Panzer Elite Texture Atlas (.bmp)` (operator id
+`export_scene.pe_rrf_atlas` in `io_import_rrf.py`). Verified against a real atlas: paint
+a region in Blender, export, and the output file is pixel-exact — painted pixels come
+through correctly, untouched regions are unchanged, file size matches the expected
+24-bit BMP formula exactly (`54 + width×height×3` bytes).
 
-This is the practical near-term feature to build — no new IDs, no UV repacking, no
-`.RRF` changes.
+### Scenario B — new texture regions (bigger job, not built)
 
 ### Scenario B — new texture regions (bigger job)
 
@@ -71,8 +72,7 @@ editor — and would be its own follow-on project, not a quick addition.
 
 ## Recommendation
 
-Build Scenario A first: a "bake painted image back into `.TLB`" export operator. It
-covers the most common modding use case (re-skinning an existing vehicle) without
-touching mesh/UV data at all, and is a well-bounded, achievable piece of work given the
-format is already fully decoded. Scenario B can follow once there's a concrete need for
-genuinely new texture layouts rather than repainting existing ones.
+Scenario A is done and covers the most common modding use case (re-skinning an existing
+vehicle) without touching mesh/UV data at all. Scenario B remains a candidate follow-on
+once there's a concrete need for genuinely new texture layouts rather than repainting
+existing ones.

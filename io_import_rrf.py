@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 2, 0),
+    "version": (0, 3, 0),
     "blender": (3, 6, 0),
-    "location": "File > Import > Panzer Elite Model (.rrf)",
-    "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library.",
+    "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp)",
+    "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game.",
     "category": "Import-Export",
 }
 
@@ -12,9 +12,11 @@ import struct
 import os
 import bpy
 import bmesh
-from bpy_extras.io_utils import ImportHelper
+from bpy_extras.io_utils import ImportHelper, ExportHelper
 from bpy.props import StringProperty, BoolProperty
 from mathutils import Matrix
+
+ATLAS_EXPECTED_SIZE = (256, 4096)
 
 HEADER_SIZE = 20
 PART_SIZE = 512
@@ -594,13 +596,90 @@ def menu_func_import(self, context):
     self.layout.operator(IMPORT_OT_rrf.bl_idname, text="Panzer Elite Model (.rrf)")
 
 
+class EXPORT_OT_rrf_atlas(bpy.types.Operator, ExportHelper):
+    """Save a texture atlas Image back out as a 24-bit .BMP the game can load.
+
+    Covers "repaint existing regions" only (see docs/PAINT_AND_EXPORT_SCOPING.md in the
+    project repo): this does NOT touch the .RRF or .TLB at all. The game's own loader
+    prefers a "<name>_24.BMP" next to the .TLB over the paletted "_8.BMP" fallback, so
+    dropping a repainted 24-bit atlas in with the matching filename is sufficient - no
+    binary format writing needed for this case. Adding genuinely new texture regions
+    (new UV layout, new .TLB entries) is a separate, bigger job - not covered here.
+    """
+    bl_idname = "export_scene.pe_rrf_atlas"
+    bl_label = "Export Panzer Elite Texture Atlas (.bmp)"
+    bl_options = {"REGISTER"}
+
+    filename_ext = ".bmp"
+    filter_glob: StringProperty(default="*.bmp", options={"HIDDEN"})
+
+    # Operators can't register a PointerProperty straight to an ID datablock (Image), so
+    # this is a plain name string with a proper search-dropdown drawn in draw() instead.
+    image_name: StringProperty(
+        name="Atlas Image",
+        description="The texture atlas Image to save out - the one you were painting "
+                    "on in Texture Paint. Every model sharing this atlas will see the "
+                    "change once this file replaces (or sits alongside) the original "
+                    "<name>_24.BMP, so double-check you're not overwriting an atlas "
+                    "other vehicles still rely on unless that's what you intend",
+    )
+
+    def draw(self, context):
+        self.layout.prop_search(self, "image_name", bpy.data, "images", text="Atlas Image")
+
+    def invoke(self, context, event):
+        if not self.image_name:
+            active_mat = getattr(context.active_object, "active_material", None)
+            if active_mat is not None and active_mat.use_nodes:
+                for node in active_mat.node_tree.nodes:
+                    if node.type == "TEX_IMAGE" and node.image is not None:
+                        self.image_name = node.image.name
+                        break
+        if self.image_name:
+            self.filepath = os.path.splitext(self.image_name)[0] + ".bmp"
+        return super().invoke(context, event)
+
+    def execute(self, context):
+        image = bpy.data.images.get(self.image_name)
+        if image is None:
+            self.report({"ERROR"}, "No image selected - pick the atlas Image you painted on")
+            return {"CANCELLED"}
+
+        if tuple(image.size) != ATLAS_EXPECTED_SIZE:
+            self.report(
+                {"WARNING"},
+                f"'{image.name}' is {image.size[0]}x{image.size[1]}, "
+                f"not the expected {ATLAS_EXPECTED_SIZE[0]}x{ATLAS_EXPECTED_SIZE[1]} - "
+                f"saving anyway, but the game may not read a resized atlas correctly",
+            )
+
+        image.filepath_raw = self.filepath
+        image.file_format = "BMP"
+        image.save()
+
+        self.report(
+            {"INFO"},
+            f"Saved '{image.name}' ({image.size[0]}x{image.size[1]}) to {self.filepath} - "
+            f"place it next to the .TLB as <name>_24.BMP for the game/ObjEdit to pick it up",
+        )
+        return {"FINISHED"}
+
+
+def menu_func_export(self, context):
+    self.layout.operator(EXPORT_OT_rrf_atlas.bl_idname, text="Panzer Elite Texture Atlas (.bmp)")
+
+
 def register():
     bpy.utils.register_class(IMPORT_OT_rrf)
+    bpy.utils.register_class(EXPORT_OT_rrf_atlas)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+    bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
 
 
 def unregister():
+    bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+    bpy.utils.unregister_class(EXPORT_OT_rrf_atlas)
     bpy.utils.unregister_class(IMPORT_OT_rrf)
 
 

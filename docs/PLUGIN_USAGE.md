@@ -47,11 +47,42 @@ default) > `tlb_search_folder` (fallback) > geometry only.
 - Normals are recalculated from mesh shape on import rather than trusted from the file
   (see [RRF_FORMAT.md](RRF_FORMAT.md) for why).
 
+## Paint and export a repainted texture
+
+Once a model is imported with textures resolved, its atlas image(s) are real Blender
+`Image` datablocks tied to materials — switch to the Texture Paint workspace and paint
+directly on the model as normal.
+
+**Important**: each atlas is shared across every vehicle/object that uses any part of
+that library, not just the one model you imported (see
+[PAINT_AND_EXPORT_SCOPING.md](PAINT_AND_EXPORT_SCOPING.md)). Painting on the image
+in Blender only affects Blender's copy — nothing changes on disk until you export — but
+when you do export, think about whether you want to replace the shared atlas everywhere
+it's used, or save to a new filename instead.
+
+To export: File > Export > Panzer Elite Texture Atlas (.bmp), pick the atlas Image you
+painted (there's a search dropdown), and choose where to save. From the Python console:
+
+```python
+bpy.ops.export_scene.pe_rrf_atlas(filepath=r"...\Texture\CustomB1_24.bmp", image_name="CustomB1_8.BMP")
+```
+
+This only covers **repainting within the model's existing texture assignments** — no
+`.RRF`/`.TLB` changes, just a replacement 24-bit `.BMP` the game's loader will prefer
+over the paletted `_8.BMP` fallback. Save it as `<name>_24.BMP` next to the `.TLB` for
+the game/ObjEdit to pick it up. Verified pixel-exact: painted regions come through
+correctly, untouched regions are unchanged, output is a standard 24-bit BMP at the
+expected 256×4096 size.
+
+Adding brand new texture regions (new UV layout, new `.TLB` entries) isn't supported —
+see Scenario B in [PAINT_AND_EXPORT_SCOPING.md](PAINT_AND_EXPORT_SCOPING.md).
+
 ## Known limitations
 
 - Only the highest-detail LOD level is imported (appropriate for editing/painting; not a
   full multi-LOD round trip).
-- No export/re-save to `.RRF`/`.TLB` yet — see
+- Export only covers repainting existing texture assignments (Scenario A) — no new
+  `.TLB` entries or `.RRF` changes; see
   [PAINT_AND_EXPORT_SCOPING.md](PAINT_AND_EXPORT_SCOPING.md).
 - Texture resolution for models without a `.RRI` and without a hand-supplied `.TLB` is
   best-effort; some faces on older content may never resolve (this is a property of the

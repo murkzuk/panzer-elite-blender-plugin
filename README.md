@@ -2,7 +2,8 @@
 
 A Blender add-on for importing Panzer Elite `.RRF` 3D model files — geometry, part
 hierarchy, pivots, gameplay attribute tags, and (where recoverable) UVs/textures from the
-game's `.TLB` texture library format.
+game's `.TLB` texture library format — plus exporting a repainted texture atlas back out
+for re-use in the game.
 
 This project is independent, clean-room reverse-engineering work: format layouts below
 were derived by direct inspection of shipped game data (`.RRF`/`.TLB`/`.RRI` files) and,
@@ -23,13 +24,19 @@ from that documentation.
 - [`docs/PLUGIN_USAGE.md`](docs/PLUGIN_USAGE.md) — how to use the importer, current
   capabilities and known limitations
 - [`docs/PAINT_AND_EXPORT_SCOPING.md`](docs/PAINT_AND_EXPORT_SCOPING.md) — feasibility
-  study for a Texture-Paint-in-Blender → repack-to-`.TLB` workflow (not yet implemented)
+  study for a Texture-Paint-in-Blender → repack-to-`.TLB` workflow, and what's built vs.
+  still open
 
 ## Status
 
 Import is working: geometry, part hierarchy with correct pivots, UVs, and texture
 resolution via a `.RRI` sidecar (when present) or best-effort auto-detection otherwise.
-Export/repack back to `.TLB` is scoped but not yet built — see the scoping doc.
+
+Export (Scenario A — repainting existing texture assignments) is working: File > Export
+> Panzer Elite Texture Atlas (.bmp) saves a painted-on Image datablock back out as a
+24-bit BMP the game/ObjEdit will load. Verified pixel-exact against a real atlas.
+Scenario B (new texture regions / new `.TLB` entries) is scoped but not built — see the
+scoping doc.
 
 ## Requirements
 
