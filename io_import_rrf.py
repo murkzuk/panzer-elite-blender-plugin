@@ -240,6 +240,20 @@ def resolve_rri_libraries(rri_slots, rrf_filepath):
     return resolved
 
 
+def default_texture_folder(rrf_filepath):
+    """Same pack-layout assumption as resolve_rri_libraries(): the .RRF lives at
+    <root>\\<PackFolder>\\Model.RRF, with a shared "Texture" folder as a sibling of
+    PackFolder. Used to auto-run the folder-scan fallback with no user input needed,
+    for models without a .RRI - so File > Import can "just work" generically for any
+    model in this kind of layout, not only ones a user happens to type a path for."""
+    rrf_dir = os.path.dirname(os.path.abspath(rrf_filepath))
+    for candidate_root in (os.path.dirname(rrf_dir), rrf_dir):
+        candidate = os.path.join(candidate_root, "Texture")
+        if os.path.isdir(candidate):
+            return candidate
+    return None
+
+
 def _read_mesh_lod0(data, mesh_off):
     (meshType, faceCount, faceList_off, faceNormList_off,
      vertexCount, vertexList_off, vertexNormList_off,
@@ -584,12 +598,16 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
     )
 
     tlb_search_folder: StringProperty(
-        name="Auto-detect TLB in Folder (fallback)",
-        description="Optional - point at a folder (e.g. the Texture folder) and every "
-                    ".TLB in it (not subfolders) is scored by how many of this model's "
-                    "texture IDs it resolves; the best match is used automatically. Only "
-                    "used if there's no .RRI (or Use .RRI is off) and Texture Library "
-                    "(.TLB) above is blank",
+        name="Auto-detect TLB in Folder (optional override)",
+        description="Only needed if the automatic sibling-Texture-folder guess isn't "
+                    "right for this install layout, or you want to point at a different "
+                    "folder. Every .TLB directly in it (not subfolders) is scored by how "
+                    "many of this model's texture IDs it resolves and the best match is "
+                    "used. Leave blank to auto-search the model's own sibling \"Texture\" "
+                    "folder (<install root>\\Texture\\, next to the .RRF's own pack "
+                    "folder) - this already runs automatically with no input needed when "
+                    "there's no .RRI (or Use .RRI is off) and Texture Library (.TLB) "
+                    "above is blank",
         subtype="DIR_PATH",
         default="",
     )
@@ -627,17 +645,21 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
             except Exception as e:
                 self.report({"WARNING"}, f"Could not read .RRI ({e}) - falling back")
 
-        if slot_sources is None and not self.tlb_filepath and self.tlb_search_folder:
-            unique_ids = sorted({t for part in parts for t in part.face_texture_id if t is not None})
-            best_path, tlb_parts, atlas_image_path, score = find_best_tlb(self.tlb_search_folder, unique_ids)
-            if best_path is None:
-                detect_msg = f" - auto-detect found no good TLB match among {len(unique_ids)} unique texture ID(s)"
-            else:
-                detect_msg = f" - auto-detected {os.path.basename(best_path)} ({score}/{len(unique_ids)} unique IDs matched)"
-                if atlas_image_path is None:
-                    self.report({"WARNING"}, f"Best TLB match {best_path} has no matching _24.BMP/_8.BMP - importing geometry only")
+        if slot_sources is None and not self.tlb_filepath:
+            search_folder = self.tlb_search_folder or default_texture_folder(self.filepath)
+            auto_derived = not self.tlb_search_folder and search_folder is not None
+            if search_folder:
+                unique_ids = sorted({t for part in parts for t in part.face_texture_id if t is not None})
+                best_path, tlb_parts, atlas_image_path, score = find_best_tlb(search_folder, unique_ids)
+                origin_note = " (auto-found sibling Texture folder)" if auto_derived else ""
+                if best_path is None:
+                    detect_msg = f" - auto-detect{origin_note} found no good TLB match among {len(unique_ids)} unique texture ID(s)"
                 else:
-                    slot_sources = {slot: (tlb_parts, atlas_image_path) for slot in range(MAX_LIBS)}
+                    detect_msg = f" - auto-detected {os.path.basename(best_path)}{origin_note} ({score}/{len(unique_ids)} unique IDs matched)"
+                    if atlas_image_path is None:
+                        self.report({"WARNING"}, f"Best TLB match {best_path} has no matching _24.BMP/_8.BMP - importing geometry only")
+                    else:
+                        slot_sources = {slot: (tlb_parts, atlas_image_path) for slot in range(MAX_LIBS)}
 
         root_name = os.path.splitext(os.path.basename(self.filepath))[0]
         collection = bpy.data.collections.new(root_name)
