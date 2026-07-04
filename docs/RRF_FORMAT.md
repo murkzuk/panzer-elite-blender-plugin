@@ -58,11 +58,24 @@ etc.) and owns its own mesh data for up to 8 LOD levels.
 | 96 | childArray[32] | u32 × 32 |
 | 224 | meshArray[8] | rrMesh × 8 (36 bytes each), one per LOD level |
 
-**Pivots are absolute (root-relative), not parent-relative deltas.** When reconstructing
-the hierarchy in another tool, treat each part's pivot as its absolute world-space
-anchor; don't sum ancestor pivots when composing the hierarchy transform, or deeply
-nested parts (e.g. gun barrel → mantlet → turret → hull) will fly out to wildly wrong
-positions.
+**Pivots are parent-relative deltas everywhere except directly under the root part.**
+The root's own pivot is the model's coordinate-frame anchor, not a translation to
+compound into its children - cancel it once for the root's direct children, then sum
+every pivot below that normally (child position = parent position + child's own pivot),
+all the way down the hierarchy.
+
+This corrects an earlier reading that treated every pivot as root-absolute and cancelled
+all of them uniformly. That seemed to fix a gun barrel (`Kanone` → `Blende` → `turm` →
+`Tiger1`) flying out under naive full summing, but that specific chain's `turm` (turret)
+pivot happens to be within a fraction of a unit of `(0,0,0)`, so cancelling every level
+and cancelling only the root's render identically there - not real evidence either way.
+A different vehicle's main gun (parent `turret`, whose pivot is a substantial
+`(0, 1.45, 7.6)`) exposed the actual bug: cancelling every level placed the gun at
+hull-deck height, completely disconnected from the turret it's mounted in. Cancelling
+only the root and letting every level past it sum naturally puts the gun exactly at
+turret height, correctly protruding from the mantlet — and the original 4-level chain
+that motivated "cancel everything" holds up fine under this corrected rule too, since it
+never actually depended on cancelling past the root in the first place.
 
 **Every non-root part's raw mesh vertices are local to that part: world position = raw
 vertex + pivot, unconditionally**, for every real vehicle and prop checked (Tiger1,

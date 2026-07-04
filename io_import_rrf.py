@@ -571,19 +571,41 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None):
         obj.hide_render = hidden
         objects.append(obj)
 
+    root = parts[0] if parts else None
     for part, obj in zip(parts, objects):
         if part.parent_no is not None and 0 <= part.parent_no < len(objects):
-            parent_obj = objects[part.parent_no]
-            obj.parent = parent_obj
-            # Pivots are absolute (root-relative), not parent-relative deltas - confirmed
-            # by the gun barrel ("Kanone", parent chain Kanone->Blende->turm->Tiger) landing
-            # far outside the hull when Blender's default parenting summed every ancestor's
-            # pivot on top of each other. Setting matrix_parent_inverse from the parent's
-            # own pivot (computed directly, not from Blender's live matrix_world, to avoid
-            # depsgraph staleness while parenting in a loop) cancels that accumulation so
-            # obj.location can stay the part's own absolute pivot at every hierarchy depth.
-            parent_pivot = parts[part.parent_no].pivot
-            obj.matrix_parent_inverse = Matrix.Translation(parent_pivot).inverted()
+            obj.parent = objects[part.parent_no]
+            parent_part = parts[part.parent_no]
+            if parent_part is root:
+                # The root part's own pivot is the model's coordinate-frame anchor, not a
+                # translation to compound into descendants - root's own mesh is always
+                # placed as world = raw vertex (see the local_verts branch above), with no
+                # pivot arithmetic involved at all. Its DIRECT children, though, still get
+                # obj.location = their own pivot (an absolute Blender property that adds
+                # into the hierarchy), so root's pivot must be explicitly cancelled here or
+                # every direct child - turret, wheels, tracks, add-on kit - drifts by
+                # root's own pivot value relative to the hull it's actually attached to.
+                # Deeper descendants (turret's own children and beyond) must NOT get this
+                # same cancellation - their parent's pivot is exactly the offset they need
+                # summed in (see below).
+                obj.matrix_parent_inverse = Matrix.Translation(parent_part.pivot).inverted()
+            # else: non-root parent - no override, so Blender's default hierarchical
+            # composition sums this part's pivot on top of its parent's (and so on up to,
+            # but not including, root) exactly as intended. Corrects an earlier, wrong
+            # reading of this format that cancelled every level's pivot uniformly
+            # (believing pivots were root-absolute, not parent-relative deltas): that
+            # seemed to fix Tiger1's gun barrel flying out under naive full summing, but
+            # Tiger1's Turret pivot happens to be within a fraction of a unit of (0,0,0),
+            # so canceling it or not renders identically there - not real evidence either
+            # way. Pz4H.RRF's main_gun (parent "turret", pivot a substantial
+            # (0, 1.45, 7.6)) exposed the actual bug: cancelling every level placed the
+            # gun at hull-deck height, disconnected from the turret it's mounted in;
+            # summing correctly (root cancelled once, everything past it left to sum
+            # naturally) puts it exactly at turret height, protruding from the mantlet -
+            # verified by rendering both models, including Tiger1's original 4-level
+            # Kanone->Blende->turm->Tiger chain, which holds up fine under this rule too
+            # (its "flying out" bug really was about needing root cancelled, just not
+            # every level beyond it).
 
     return objects, resolved_count, unresolved_count
 
