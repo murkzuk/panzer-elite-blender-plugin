@@ -69,7 +69,7 @@ OBJ_TYPE_NAMES = {
 
 
 def fixed_to_float(raw):
-    """rrCoord/rrAngle are 32-bit 16.16 fixed point, never plain float (confirmed: __RRFLOAT__ is never defined anywhere in the source)."""
+    """rrCoord/rrAngle are always 32-bit 16.16 fixed point, never plain float, in every file checked."""
     return raw / 65536.0
 
 

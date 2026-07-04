@@ -5,12 +5,13 @@ hierarchy, pivots, gameplay attribute tags, and (where recoverable) UVs/textures
 game's `.TLB` texture library format — plus exporting a repainted texture atlas back out
 for re-use in the game.
 
-This project is independent, clean-room reverse-engineering work: format layouts below
-were derived by direct inspection of shipped game data (`.RRF`/`.TLB`/`.RRI` files) and,
-where necessary, cross-checked against a live paint-and-save test in the original
-`ObjEdit` tool. **No original Panzer Elite/ObjEdit source code is included in this
-repository** — only the format documentation and the original Python importer written
-from that documentation.
+The format layouts documented here were worked out primarily by direct inspection of
+shipped game data (`.RRF`/`.TLB`/`.RRI` files) and a live paint-and-save test against the
+original `ObjEdit` tool, informed in places by limited excerpts of the original codebase
+the author has partial, legitimate access to. **This repository does not include any
+original Panzer Elite/ObjEdit source code, in full or in part** — only the resulting
+format documentation, written in original wording, and a newly-written Python importer
+built from that documentation.
 
 ## Contents
 

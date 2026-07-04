@@ -50,9 +50,8 @@ heavily-edited models only resolve a fraction of their faces** — commonly some
 between 10% and 30% in real assets checked, occasionally much higher on models with a
 current `.RRI`.
 
-The reason: tracing the renderer's own texture-upload code path shows that in some
-build(s) of the tool, `textureOfset` was populated from a live hardware texture handle
-returned by the graphics API at paint time (`halSendTextureBMP`), not a stable ID.
+The reason: in some build(s) of the tool, `textureOfset` was populated from a live
+hardware texture handle returned by the graphics driver at paint time, not a stable ID.
 That's fundamentally a runtime value — it has no relationship to any `.TLB`'s own
 per-entry ID, and there is no way to reconstruct it from the saved files after the fact.
 
