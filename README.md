@@ -32,6 +32,7 @@ built from that documentation.
 - [`docs/PAINT_AND_EXPORT_SCOPING.md`](docs/PAINT_AND_EXPORT_SCOPING.md) — feasibility
   study for a Texture-Paint-in-Blender → repack-to-`.TLB` workflow, and what's built vs.
   still open
+- [`TODO.md`](TODO.md) — running backlog of known issues and planned work
 
 ## Status
 
