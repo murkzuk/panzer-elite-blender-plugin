@@ -1,5 +1,10 @@
 # Panzer Elite (1999) Blender Importer
 
+**[Download the latest release](https://github.com/murkzuk/panzer-elite-blender-plugin/releases/latest)**
+(zip or the plain `.py` file, either works) — then in Blender: Edit > Preferences >
+Add-ons > Install from Disk, pick the file you downloaded, and tick the checkbox to
+enable it. Requires Blender 3.6+.
+
 A Blender add-on for importing Panzer Elite `.RRF` 3D model files — geometry, part
 hierarchy, pivots, gameplay attribute tags, and (where recoverable) UVs/textures from the
 game's `.TLB` texture library format — plus exporting a repainted texture atlas back out
