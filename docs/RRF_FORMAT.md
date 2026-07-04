@@ -58,13 +58,25 @@ etc.) and owns its own mesh data for up to 8 LOD levels.
 | 96 | childArray[32] | u32 × 32 |
 | 224 | meshArray[8] | rrMesh × 8 (36 bytes each), one per LOD level |
 
-**Pivots are absolute (root-relative), not parent-relative deltas.** A part's own mesh
-vertices are already centered on that part's own local origin, independent of its pivot.
-Confirmed by bounding-box inspection across a real 13-part tank model — every part's
-bbox is symmetric around (0,0,0) regardless of pivot value. When reconstructing the
-hierarchy in another tool, treat each part's pivot as its absolute world-space anchor;
-don't sum ancestor pivots when composing the hierarchy transform, or deeply nested parts
-(e.g. gun barrel → mantlet → turret → hull) will fly out to wildly wrong positions.
+**Pivots are absolute (root-relative), not parent-relative deltas.** When reconstructing
+the hierarchy in another tool, treat each part's pivot as its absolute world-space
+anchor; don't sum ancestor pivots when composing the hierarchy transform, or deeply
+nested parts (e.g. gun barrel → mantlet → turret → hull) will fly out to wildly wrong
+positions.
+
+**Two different vertex conventions exist, and nothing in the format flags which one a
+given file uses.** On the vehicles checked (tanks), a part's raw mesh vertices are
+already in one shared/assembled coordinate frame — world position = raw vertex,
+unmodified; the pivot is only a rotation-origin marker. On at least some static
+props/scenery (confirmed on a horse-drawn cart model), raw vertices are **part-local**
+and need the part's own pivot added back: world position = raw vertex + pivot. Assuming
+the vehicle convention on this kind of content produces parts flung tens of units
+outside the model's own bounding box.
+
+There's no reliable way to know in advance which convention a given file uses — detect
+it empirically per model: try both conventions on every non-root part and see which one
+keeps parts nested inside (or close to) the root part's own bounding box. The wrong
+convention overshoots it dramatically; the right one doesn't.
 
 ### Mesh record (36 bytes, one per LOD level)
 
