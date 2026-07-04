@@ -14,20 +14,29 @@ for full control over the optional texture arguments:
 bpy.ops.import_scene.pe_rrf(filepath=r"C:\path\to\Model.RRF")
 ```
 
-Texture resolution is automatic and needs no extra arguments if a `.RRI` sits next to
-the model (see [RRI_FORMAT.md](RRI_FORMAT.md)) — the importer finds and uses it. To
-override:
+Texture resolution needs no extra arguments at all for a typical
+`<install root>\<PackFolder>\Model.RRF` layout with a sibling `Texture\` folder (the
+common case) — the importer automatically:
+
+1. Uses a companion `.RRI` if one sits next to the model (see
+   [RRI_FORMAT.md](RRI_FORMAT.md)) — the precise answer, no searching needed.
+2. Otherwise auto-derives the model's sibling `Texture\` folder and scans every `.TLB`
+   in it, scoring each by how many of the model's texture IDs it resolves, and uses the
+   best match.
+
+To override when needed:
 
 ```python
-# Force a specific .TLB (skips .RRI/auto-detect)
+# Force a specific .TLB (skips .RRI/auto-detect entirely)
 bpy.ops.import_scene.pe_rrf(filepath=r"...\Model.RRF", tlb_filepath=r"...\Some.TLB")
 
-# No .RRI available - scan a folder and auto-pick the best-matching .TLB
-bpy.ops.import_scene.pe_rrf(filepath=r"...\Model.RRF", tlb_search_folder=r"...\Texture")
+# Point the auto-detect scan at a different folder than the auto-derived sibling one
+bpy.ops.import_scene.pe_rrf(filepath=r"...\Model.RRF", tlb_search_folder=r"...\SomeOtherTexture")
 ```
 
 Priority order: `tlb_filepath` (manual) > `.RRI` (if present and `use_rri` is on,
-default) > `tlb_search_folder` (fallback) > geometry only.
+default) > `tlb_search_folder` (explicit override, if given) > auto-derived sibling
+`Texture\` folder > geometry only.
 
 ## What you get
 
