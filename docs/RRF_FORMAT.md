@@ -74,9 +74,30 @@ the vehicle convention on this kind of content produces parts flung tens of unit
 outside the model's own bounding box.
 
 There's no reliable way to know in advance which convention a given file uses — detect
-it empirically per model: try both conventions on every non-root part and see which one
-keeps parts nested inside (or close to) the root part's own bounding box. The wrong
-convention overshoots it dramatically; the right one doesn't.
+it empirically, and **per part, not once for the whole file**: real content mixes both
+within a single model. A Panzer IV hull (`Pz4H.RRF`) has its hull/turret/tracks/gun
+already in world-space, while its 16 road wheels, hatch, and commander figure are
+part-local and need their own pivot added back. Checking only a single file-wide vote
+let the 16 near-identical, near-origin wheels out-vote the correct per-part answer,
+stacking every wheel on the model's centre instead of spreading them along the hull.
+
+For most parts, trying both conventions and seeing which one keeps the part nested
+inside (or close to) the root part's own bounding box works cleanly — the wrong
+convention overshoots it dramatically, the right one doesn't. Two situations defeat that
+test on its own and need extra handling:
+
+- **Small appendages** (a hatch, a commander figure, a hull machine gun) are small
+  enough that *both* conventions land trivially inside the generous root bbox with near-
+  zero overshoot either way. When tied like this, default to "add pivot" — a part modeled
+  at/near its own local origin, small relative to the whole model, is characteristic of a
+  placed/reusable part.
+- **Duplicated parts** (e.g. 16 road wheels sharing one mesh, placed only via differing
+  pivots) defeat the overshoot test outright: "raw" trivially nests at the shared local
+  origin with zero overshoot, scoring better than "add pivot" even though every copy
+  would render stacked on top of the others. Detected directly instead: if a part's raw
+  bounding box is (almost) identical to a sibling's (same parent) that has a materially
+  different pivot, they're evidently one mesh reused at multiple placements, so add pivot
+  regardless of what the overshoot test concluded.
 
 ### Mesh record (36 bytes, one per LOD level)
 
