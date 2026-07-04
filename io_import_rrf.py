@@ -372,115 +372,43 @@ def _bbox(vertices):
     return (min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs))
 
 
-def _bbox_overshoot(bbox_min, bbox_max, ref_min, ref_max):
-    """How far (bbox_min, bbox_max) sticks out past the reference box, summed over axes -
-    0 if it's fully nested inside, growing with how far outside it extends."""
-    total = 0.0
-    for i in range(3):
-        total += max(0.0, ref_min[i] - bbox_min[i])
-        total += max(0.0, bbox_max[i] - ref_max[i])
-    return total
-
-
-def _bbox_diag(bbox_min, bbox_max):
-    return sum((bbox_max[i] - bbox_min[i]) ** 2 for i in range(3)) ** 0.5
-
-
 def detect_add_pivot_convention(parts):
-    """Two different vertex conventions show up in real shipped .RRF files, and there's no
-    flag in the format that says which one a given file uses:
+    """Every non-root part's raw vertices are local to that part - world position = raw
+    vertex + pivot, unconditionally, for every real vehicle and prop checked.
 
-    - vehicles (tanks etc.): each part's raw vertices are already in one shared/assembled
-      coordinate frame - world position = raw vertex, unmodified (confirmed against real
-      Tiger/Panzer IV/Panther models, screenshots looked correct).
-    - at least some static props/scenery (e.g. a horse-drawn cart): each part's raw
-      vertices are local to that part and need its own pivot added back -
-      world position = raw vertex + pivot. Assuming "world = raw" for these produces
-      wildly wrong results - parts land far outside the model's own bounding box (a cart
-      wheel ending up 75 units away from the cart bed, for a ~30-unit-tall model).
+    This corrects two earlier, wrong versions of this function. The first assumed
+    vehicles use "world = raw vertex" unmodified (no pivot add) based on early testing
+    that never actually exercised the difference: several parts checked at the time
+    (e.g. Tiger1's Turret/trackL/trackR) happen to have a pivot within a fraction of a
+    unit of (0,0,0), so "add pivot" and "don't" render identically for them regardless
+    of which is correct - the screenshots that seemed to confirm "no add" were actually
+    uninformative, not supporting evidence.
 
-    **This is decided per PART, not once for the whole file** - real content mixes both
-    within a single model. Confirmed on a Panzer IV (`Pz4H.RRF`, CustomB): the hull,
-    turret, tracks and gun are already world-space (no add), while the 16 road wheels,
-    hatch and commander figure are part-local (need +pivot) - checking only a single
-    file-wide vote previously let the 16 near-identical, near-origin wheels out-vote the
-    correct decision for the whole file, stacking every wheel on top of itself at the
-    model's centre instead of spreading them along the hull.
+    The second version tried to detect the convention per part (comparing how far each
+    candidate placement oversoots the root part's own bounding box), after noticing
+    Pz4H.RRF's 16 road wheels render stacked at the model's centre under a single
+    file-wide "no add" vote. That per-part heuristic was itself wrong: it also flagged
+    Pz4H.RRF's turret and Tiger1's hatch/radio/gun/coax MG as "no add", on the theory
+    that a part cleanly nesting inside the root bbox without adding its pivot must
+    already be in world-space. Rendered and visually checked (not just bbox math) -
+    Pz4H.RRF's turret with "no add" is a flat slab fused into the hull roof; with "add
+    pivot" it's an unmistakable, correctly elevated turret with mantlet and cupola.
+    The bbox-overshoot signal is simply unreliable here: a part sitting correctly
+    *above* the hull roof, *below* the hull belly, or spread along the hull sides
+    routinely and legitimately falls outside the hull mesh's own narrow bounding box,
+    which is exactly what the overshoot test penalizes.
 
-    Per part, against the root's own bounding box:
-    1. Compare summed-axis overshoot (how far outside the root bbox each convention
-       lands) for "raw" vs "raw+pivot". A large, unique part (hull/turret/track) shows a
-       clear, decisive difference - the wrong convention shoots it noticeably outside the
-       root bbox, so whichever is lower wins outright.
-    2. Small appendage parts (hatch, commander, a barrel-mounted MG) are small enough
-       that *both* conventions land trivially inside the generous root bbox with near-
-       zero overshoot either way - the overshoot test alone can't tell them apart. When
-       tied like this, default to "add pivot": a part that's small relative to the whole
-       model and modeled at/near its own local origin is characteristic of a placed,
-       reusable part, not a coincidence.
-    3. Repeated/duplicated parts (e.g. 16 road wheels sharing one mesh, placed only via
-       differing pivots) defeat step 1 outright - "raw" trivially nests at the shared
-       local origin with zero overshoot, scoring better than "add pivot" even though
-       every copy would render stacked on top of the others. Detected directly: if a
-       part's raw bounding box is (almost) identical to a sibling's (same parent) that
-       has a materially different pivot, they're evidently one mesh reused at multiple
-       placements, so add pivot regardless of what step 1 concluded.
+    Every non-root part in every real file checked (Tiger1, Pz4H_3, Pz4H, Pz4H2,
+    PantherG2, ISU-152, aaFlatcar) has a substantial, non-trivial pivot - consistent
+    with a standard rigged-parts-hierarchy design (mesh authored local to its own pivot,
+    placed by translating to that pivot), not a coincidence specific to one asset.
 
-    Returns {part_index: bool} - True means world position = raw vertex + pivot for that
-    part. The root part is never included (nothing to nest it inside).
+    Returns {part_index: True} for every non-root part that has vertex data. The root
+    part is never included (nothing to nest it inside).
     """
-    root = parts[0] if parts else None
-    result = {}
-    if root is None or not root.vertices:
-        return result
-
-    ref_min, ref_max = _bbox(root.vertices)
-    ref_diag = _bbox_diag(ref_min, ref_max)
-    tie_eps = max(ref_diag * 0.02, 1e-6)
-
-    raw_bbox_by_part = {}
-    for part in parts[1:]:
-        if not part.vertices:
-            continue
-        raw_bbox_by_part[part.index] = _bbox(part.vertices)
-
-    for part in parts[1:]:
-        if not part.vertices:
-            continue
-        raw_min, raw_max = raw_bbox_by_part[part.index]
-        px, py, pz = part.pivot
-        added_min = (raw_min[0] + px, raw_min[1] + py, raw_min[2] + pz)
-        added_max = (raw_max[0] + px, raw_max[1] + py, raw_max[2] + pz)
-        raw_overshoot = _bbox_overshoot(raw_min, raw_max, ref_min, ref_max)
-        added_overshoot = _bbox_overshoot(added_min, added_max, ref_min, ref_max)
-
-        if raw_overshoot < tie_eps and added_overshoot < tie_eps:
-            add_pivot = True  # step 2: tied/trivial - default to the placed-part reading
-        else:
-            add_pivot = added_overshoot < raw_overshoot  # step 1: decisive difference
-
-            if not add_pivot:
-                # step 3: duplicated-mesh override - only relevant when step 1 preferred
-                # "raw", since a correctly-detected added-pivot part needs no rescue.
-                for sibling in parts[1:]:
-                    if sibling.index == part.index or sibling.parent_no != part.parent_no:
-                        continue
-                    sib_bbox = raw_bbox_by_part.get(sibling.index)
-                    if sib_bbox is None:
-                        continue
-                    sib_min, sib_max = sib_bbox
-                    same_shape = (
-                        _bbox_overshoot(raw_min, raw_max, sib_min, sib_max) < tie_eps
-                        and _bbox_overshoot(sib_min, sib_max, raw_min, raw_max) < tie_eps
-                    )
-                    pivot_delta = sum((a - b) ** 2 for a, b in zip(part.pivot, sibling.pivot)) ** 0.5
-                    if same_shape and pivot_delta > tie_eps:
-                        add_pivot = True
-                        break
-
-        result[part.index] = add_pivot
-
-    return result
+    if not parts:
+        return {}
+    return {part.index: True for part in parts[1:] if part.vertices}
 
 
 def _build_material(root_name, image_path):

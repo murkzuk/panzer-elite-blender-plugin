@@ -64,40 +64,33 @@ anchor; don't sum ancestor pivots when composing the hierarchy transform, or dee
 nested parts (e.g. gun barrel → mantlet → turret → hull) will fly out to wildly wrong
 positions.
 
-**Two different vertex conventions exist, and nothing in the format flags which one a
-given file uses.** On the vehicles checked (tanks), a part's raw mesh vertices are
-already in one shared/assembled coordinate frame — world position = raw vertex,
-unmodified; the pivot is only a rotation-origin marker. On at least some static
-props/scenery (confirmed on a horse-drawn cart model), raw vertices are **part-local**
-and need the part's own pivot added back: world position = raw vertex + pivot. Assuming
-the vehicle convention on this kind of content produces parts flung tens of units
-outside the model's own bounding box.
+**Every non-root part's raw mesh vertices are local to that part: world position = raw
+vertex + pivot, unconditionally**, for every real vehicle and prop checked (Tiger1,
+Pz4H_3, Pz4H, Pz4H2, PantherG2, ISU-152, a horse-drawn cart). This corrects two earlier,
+wrong readings of this format:
 
-There's no reliable way to know in advance which convention a given file uses — detect
-it empirically, and **per part, not once for the whole file**: real content mixes both
-within a single model. A Panzer IV hull (`Pz4H.RRF`) has its hull/turret/tracks/gun
-already in world-space, while its 16 road wheels, hatch, and commander figure are
-part-local and need their own pivot added back. Checking only a single file-wide vote
-let the 16 near-identical, near-origin wheels out-vote the correct per-part answer,
-stacking every wheel on the model's centre instead of spreading them along the hull.
+- The first assumed vehicles instead use "world = raw vertex" unmodified, based on early
+  testing that never actually exercised the difference — several parts checked at the
+  time (e.g. Tiger1's Turret, and both tracks) happen to have a pivot within a fraction
+  of a unit of `(0,0,0)`, so adding it or not renders identically either way. The
+  screenshots that seemed to confirm "no add" were coincidental, not real evidence.
+- The second tried to detect the convention per part, comparing how far each candidate
+  placement oversoots the root part's own bounding box, after noticing a Panzer IV's
+  (`Pz4H.RRF`) 16 road wheels rendering stacked at the model's centre under a single
+  file-wide "no add" choice. That per-part heuristic was *also* wrong: it flagged that
+  same model's turret, and Tiger1's hatch/radio/gun/coax MG, as "no add" too, on the
+  theory that a part cleanly nesting inside the root part's bbox without its pivot must
+  already be in world-space. Rendered and inspected visually (not just checked against
+  bbox math) — with "no add", the turret is a flat slab fused into the hull roof; with
+  "add pivot", it's an unmistakable, correctly elevated turret with mantlet and cupola.
+  Bounding-box overshoot against the root part is simply an unreliable signal here: a
+  part sitting correctly above the hull roof, below the hull belly, or spread along the
+  hull sides routinely and legitimately falls outside the hull mesh's own narrow bounds,
+  which is exactly what an overshoot test penalizes.
 
-For most parts, trying both conventions and seeing which one keeps the part nested
-inside (or close to) the root part's own bounding box works cleanly — the wrong
-convention overshoots it dramatically, the right one doesn't. Two situations defeat that
-test on its own and need extra handling:
-
-- **Small appendages** (a hatch, a commander figure, a hull machine gun) are small
-  enough that *both* conventions land trivially inside the generous root bbox with near-
-  zero overshoot either way. When tied like this, default to "add pivot" — a part modeled
-  at/near its own local origin, small relative to the whole model, is characteristic of a
-  placed/reusable part.
-- **Duplicated parts** (e.g. 16 road wheels sharing one mesh, placed only via differing
-  pivots) defeat the overshoot test outright: "raw" trivially nests at the shared local
-  origin with zero overshoot, scoring better than "add pivot" even though every copy
-  would render stacked on top of the others. Detected directly instead: if a part's raw
-  bounding box is (almost) identical to a sibling's (same parent) that has a materially
-  different pivot, they're evidently one mesh reused at multiple placements, so add pivot
-  regardless of what the overshoot test concluded.
+Every non-root part in every real file checked has a substantial, non-trivial pivot —
+consistent with an ordinary rigged-parts-hierarchy design (mesh authored local to its
+own pivot, placed by translating to that pivot), not a coincidence specific to one asset.
 
 ### Mesh record (36 bytes, one per LOD level)
 
