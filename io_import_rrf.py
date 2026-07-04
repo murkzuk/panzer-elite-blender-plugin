@@ -421,6 +421,16 @@ def _build_material(root_name, image_path):
     tex_node.interpolation = "Closest"  # this is 1999 paletted atlas art, keep it crisp
     if bsdf is not None:
         material.node_tree.links.new(tex_node.outputs["Color"], bsdf.inputs["Base Color"])
+    # Blender's Texture Paint mode paints onto whichever Image Texture node is the node
+    # tree's *active* node, not just any node carrying an image - left at the default (the
+    # Material Output node the material starts with), Texture Paint has no canvas to paint
+    # on at all (tool_settings.image_paint.canvas comes back None), so a real paint stroke
+    # silently does nothing. Selecting and marking this node active is what makes painting
+    # on the imported atlas actually work.
+    for node in material.node_tree.nodes:
+        node.select = False
+    tex_node.select = True
+    material.node_tree.nodes.active = tex_node
     return material
 
 

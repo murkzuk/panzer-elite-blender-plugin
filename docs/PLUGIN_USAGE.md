@@ -62,6 +62,14 @@ Once a model is imported with textures resolved, its atlas image(s) are real Ble
 `Image` datablocks tied to materials — switch to the Texture Paint workspace and paint
 directly on the model as normal.
 
+If painting seems to do nothing: check the Texture Paint properties panel's "Slots" list
+shows the atlas image (not empty). This was a real bug in earlier versions — the
+imported material's Image Texture node wasn't marked as the node tree's *active* node,
+which is what Blender's Material-mode texture painting actually reads to find a canvas;
+without it, `tool_settings.image_paint.canvas` comes back empty and a paint stroke lands
+nowhere. Fixed by having the importer select and activate that node itself, so this
+should no longer come up on models imported since the fix.
+
 **Important**: each atlas is shared across every vehicle/object that uses any part of
 that library, not just the one model you imported (see
 [PAINT_AND_EXPORT_SCOPING.md](PAINT_AND_EXPORT_SCOPING.md)). Painting on the image
