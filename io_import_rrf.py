@@ -133,14 +133,17 @@ def find_atlas_image(tlb_filepath):
     return None
 
 
-def find_best_tlb(folder, unique_texture_ids, min_score=8):
+def find_best_tlb(folder, unique_texture_ids, min_ratio=0.15, min_absolute=3):
     """Scan every .TLB directly inside `folder` (not recursive) and score each by how many
     of unique_texture_ids resolve against it via resolve_texture_id(). There's no reliable
     metadata anywhere (checked the unit CSV database - it only has damage-decal filenames)
     linking a model to the library it was painted from, so this brute-force score is the
     practical substitute: unrelated libraries share a handful of common low IDs (generic
-    materials like flat black/green), so min_score filters that noise floor out - real
-    matches score well above it in every case checked so far.
+    materials like flat black/green) - noise-floor matches sit around 3-6% of a model's
+    unique IDs in every case checked, genuine matches 30%+, so a ratio threshold separates
+    them far more reliably than a fixed count (a fixed count of 8 wrongly rejected a real
+    4-of-12 match on a small model where most of the other IDs were permanently-unrecoverable
+    HAL handles, not a resolution failure - see TEXTURE_ID_RESOLUTION.md).
     Returns (best_path, best_tlb_parts, best_atlas_path, best_score) or (None, None, None, 0).
     """
     if not unique_texture_ids:
@@ -171,6 +174,7 @@ def find_best_tlb(folder, unique_texture_ids, min_score=8):
         if score > best_score:
             best_score, best_path, best_parts = score, path, tlb_parts
 
+    min_score = max(min_absolute, min_ratio * len(unique_texture_ids))
     if best_path is None or best_score < min_score:
         return None, None, None, best_score
 
