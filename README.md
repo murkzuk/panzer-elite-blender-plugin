@@ -45,8 +45,15 @@ Export (Scenario A — repainting existing texture assignments): File > Export >
 Elite Texture Atlas (.bmp) saves a painted-on Image datablock back out as a 24-bit BMP.
 Checked so far only via an automated pixel comparison of the round-tripped file (painted
 regions match, untouched regions match, correct format/size) — **not yet tested by
-loading an export in the real game or ObjEdit.** Scenario B (new texture regions / new
-`.TLB` entries) is scoped but not built — see the scoping doc.
+loading an export in the real game or ObjEdit.**
+
+`.TLB` writing (a building block toward Scenario B and the longer-term goal of full
+ObjEdit parity - see [`TODO.md`](TODO.md)): `read_tlb_library()`/`write_tlb_library()`
+round-trip every real `.TLB` file checked (98 of 98) byte-for-byte, and
+`append_tlb_entry()` can add a new entry to an existing library with a correctly assigned
+id. Not yet wired into any menu/operator, and doesn't yet touch the `.RRF` side (a face
+still needs its own record rewritten to actually point at a new entry) or find free space
+in the atlas image itself - see the scoping doc for what's still open.
 
 ## Requirements
 

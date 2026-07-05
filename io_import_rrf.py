@@ -108,6 +108,157 @@ def read_tlb(filepath):
     return parts
 
 
+TLB_FILE_SIZE = 8 + 2048 + 256 + TLB_MAX_PARTS * TLB_ENTRY_SIZE  # 461064, every real .TLB checked
+
+
+class TLBEntry:
+    __slots__ = ("id", "filename", "cutX", "cutY", "sizeX", "sizeY", "posX", "posY", "_reserved")
+
+
+class TLBLibrary:
+    __slots__ = ("lib_next_id", "palette", "mat_pal", "entries", "_raw_parts_baseline")
+
+
+def read_tlb_library(filepath):
+    """Full-fidelity .TLB read for anything that needs to WRITE the file back out -
+    read_tlb() above only keeps what the importer needs (a texture_id -> rect lookup) and
+    throws away the palette, libNextID counter, filenames, and crop origin, none of which
+    round-trip through it. Returns a TLBLibrary.
+
+    Entry ids are kept exactly as stored, with no assumption they fit in [0, TLB_MAX_PARTS)
+    - real content has occasional entries carrying a much larger id inherited from a
+    different library the content was originally copied from (confirmed on CustomB1.TLB:
+    2 of 275 entries carry an id in the millions, with a real "Desert1_8.bmp" source
+    filename - clearly reused content, not corruption). Those entries can never actually
+    be reached by resolve_texture_id()'s modulo lookup (candidate is always < TLB_MAX_PARTS),
+    but they're still real, valid file content and must round-trip untouched regardless.
+
+    Each entry's trailing 4 bytes (offset 108, TLB_FORMAT.md's "unused" field) are kept
+    too, as `_reserved` - real files have non-zero leftover bytes there (an editor-only
+    in-memory pointer that apparently never gets cleared before saving), not always zero
+    as first assumed. Meaningless to interpret, but real on-disk content that a byte-exact
+    round-trip needs to preserve rather than silently zero out.
+
+    Also keeps the *entire* 4096-slot parts array as `_raw_parts_baseline`, not just the
+    first libEntryCount entries - slots beyond libEntryCount aren't zeroed either in real
+    files (confirmed on CustomA11.TLB: stale non-zero bytes sitting past its own
+    libEntryCount=75, presumably a deleted/replaced entry's leftover data the editor never
+    bothered clearing). write_tlb_library() uses this as a base layer and only overwrites
+    the slots covered by `entries`, so anything else round-trips exactly regardless of
+    what it actually is.
+    """
+    with open(filepath, "rb") as f:
+        data = f.read()
+
+    if len(data) != TLB_FILE_SIZE:
+        # Found one real file like this (`_Normandy7.TLB`, leading underscore - the same
+        # "disabled" naming convention used elsewhere in this asset set): a completely
+        # normal-looking header and entry table, but ~3.1MB of repeating junk bytes
+        # appended after the real 461,064-byte structure. Refuse rather than silently
+        # dropping that tail on write - a genuine format variant would need investigating,
+        # not guessing at here.
+        raise ValueError(
+            f"{filepath} is {len(data)} bytes, not the expected {TLB_FILE_SIZE} - not a "
+            f"standard .TLB (or has trailing garbage/is corrupted); refusing to read since "
+            f"a byte-exact round trip can't be guaranteed"
+        )
+
+    lib_next_id, lib_entry_count = struct.unpack_from("<ii", data, 0)
+    lib_entry_count = max(0, min(lib_entry_count, TLB_MAX_PARTS))
+
+    library = TLBLibrary()
+    library.lib_next_id = lib_next_id
+    library.palette = bytes(data[8:8 + 2048])
+    library.mat_pal = bytes(data[2056:2056 + 256])
+    library.entries = []
+    library._raw_parts_baseline = bytes(data[TLB_PARTS_OFFSET:TLB_PARTS_OFFSET + TLB_MAX_PARTS * TLB_ENTRY_SIZE])
+
+    for i in range(lib_entry_count):
+        off = TLB_PARTS_OFFSET + i * TLB_ENTRY_SIZE
+        entry_id, = struct.unpack_from("<i", data, off)
+        cutX, cutY, sizeX, sizeY, posX, posY = struct.unpack_from("<iiiiii", data, off + 84)
+        entry = TLBEntry()
+        entry.id = entry_id
+        entry.filename = bytes(data[off + 4:off + 84])  # raw char[80], kept verbatim - author-time path, no encoding to assume
+        entry.cutX, entry.cutY = cutX, cutY
+        entry.sizeX, entry.sizeY = sizeX, sizeY
+        entry.posX, entry.posY = posX, posY
+        entry._reserved = bytes(data[off + 108:off + 112])
+        library.entries.append(entry)
+
+    return library
+
+
+def new_tlb_library():
+    """A blank TLBLibrary for building a .TLB from scratch (no existing file to base it
+    on) - zero-filled palette/mat_pal/parts-array baseline, id counter starting at 0, no
+    entries. Real .TLB files always have SOME palette data, but this project has no
+    genuine "build a fresh library" use case yet (only modifying existing ones), so this
+    is an honestly-blank starting point, not a claim about what a real fresh ObjEdit
+    library's palette looks like."""
+    library = TLBLibrary()
+    library.lib_next_id = 0
+    library.palette = bytes(2048)
+    library.mat_pal = bytes(256)
+    library.entries = []
+    library._raw_parts_baseline = bytes(TLB_MAX_PARTS * TLB_ENTRY_SIZE)
+    return library
+
+
+def write_tlb_library(filepath, library):
+    """Writes a TLBLibrary back out to the exact 461,064-byte .TLB layout - the write side
+    of read_tlb_library(). Slots not covered by `entries` keep whatever was in
+    `_raw_parts_baseline` at that position (see read_tlb_library()'s docstring) rather
+    than being zeroed, so modifying a handful of entries in an existing library round-trips
+    every other byte in the file exactly."""
+    if len(library.entries) > TLB_MAX_PARTS:
+        raise ValueError(f"{len(library.entries)} entries exceeds the .TLB format's {TLB_MAX_PARTS}-entry limit")
+
+    buf = bytearray(TLB_FILE_SIZE)
+    struct.pack_into("<ii", buf, 0, library.lib_next_id, len(library.entries))
+    buf[8:8 + 2048] = library.palette
+    buf[2056:2056 + 256] = library.mat_pal
+    buf[TLB_PARTS_OFFSET:TLB_PARTS_OFFSET + TLB_MAX_PARTS * TLB_ENTRY_SIZE] = library._raw_parts_baseline
+
+    for i, entry in enumerate(library.entries):
+        off = TLB_PARTS_OFFSET + i * TLB_ENTRY_SIZE
+        struct.pack_into("<i", buf, off, entry.id)
+        buf[off + 4:off + 84] = entry.filename[:80].ljust(80, b"\x00")
+        struct.pack_into(
+            "<iiiiii", buf, off + 84,
+            entry.cutX, entry.cutY, entry.sizeX, entry.sizeY, entry.posX, entry.posY,
+        )
+        buf[off + 108:off + 112] = entry._reserved
+
+    with open(filepath, "wb") as f:
+        f.write(buf)
+
+
+def append_tlb_entry(library, sizeX, sizeY, posX, posY, cutX=0, cutY=0, filename=b""):
+    """Allocates a new entry: assigns library.lib_next_id as the id (matching ObjEdit's
+    own running counter - confirmed against real content where libNextID sits exactly one
+    past the highest *normal* id in nearly every file checked) and increments it, so newly
+    assigned ids stay small and land correctly within resolve_texture_id()'s modulo lookup
+    range, regardless of any pre-existing oddities already in the file. Caller is
+    responsible for finding free atlas space (posX/posY) - this only manages the .TLB's
+    own id counter and entry array. Returns the newly assigned id."""
+    if len(library.entries) >= TLB_MAX_PARTS:
+        raise ValueError(f"library is full ({TLB_MAX_PARTS} entries)")
+
+    filename_bytes = filename if isinstance(filename, (bytes, bytearray)) else filename.encode("latin-1")
+
+    entry = TLBEntry()
+    entry.id = library.lib_next_id
+    entry.filename = filename_bytes
+    entry.cutX, entry.cutY = cutX, cutY
+    entry.sizeX, entry.sizeY = sizeX, sizeY
+    entry.posX, entry.posY = posX, posY
+    entry._reserved = b"\x00\x00\x00\x00"
+    library.entries.append(entry)
+    library.lib_next_id += 1
+    return entry.id
+
+
 def resolve_texture_id(texture_id, slot_to_parts):
     """slot_to_parts: {key: tlb_parts_dict} (key is just a label to say which library
     matched, e.g. a .RRI slot number - it doesn't need to mean anything to this function).
