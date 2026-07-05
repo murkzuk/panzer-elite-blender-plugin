@@ -43,10 +43,64 @@ Running list of things flagged during work sessions, not yet done. Newest first.
   general new-content painting - PAINT_AND_EXPORT_SCOPING.md still needs updating to
   reflect that this specific case is now built.
 
+- [ ] **Give a whole vehicle its own private, freely-paintable skin — scoped 2026-07-05,
+  not started. Bigger than "detach face"; needs real new work, not just running that
+  operator in bulk.** User's goal: import a model with *every* library it actually uses
+  (see the multi-`.TLB` item below - a real prerequisite for starting from a complete
+  texture baseline, not a nice-to-have), then generate a brand-new, dedicated `.TLB` +
+  atlas used by nothing else, laid out with Blender's own Smart UV Project so the whole
+  model can be painted as a clean canvas with no risk of affecting any other vehicle.
+
+  Ruled out one apparent blocker already: Smart UV Project being "unaware of other
+  content" (the objection raised against using it for `MESH_OT_pe_detach_face_texture`)
+  doesn't apply here - that objection was specifically about relocating a UV into an
+  *existing, shared* atlas with other real vehicles' textures already in it. A **brand
+  new, empty** `.TLB` has nothing else in it to collide with, so Smart UV Project is
+  exactly the right tool for laying it out, and needs no manual UV skill to run (one
+  operator call).
+
+  The real new work is on the `.RRF`/`.TLB` side, not the UV-unwrap side. PE's texture
+  assignment isn't a generic "one continuous atlas, arbitrary per-vertex UV" system like
+  a modern engine - each face is assigned to exactly one `.TLB` entry (a rectangle), and
+  its own crop *within* that entry is defined by up to 4 corner pixel offsets
+  (`v1`/`v2`/`v3`/`textureHalf`, see [RRF_FORMAT.md](docs/RRF_FORMAT.md)) that are each a
+  single unsigned byte (0-255, confirmed in `_corner_xy()`) - so **any one face's own
+  visible crop is capped at 256×256 pixels**, though the *entry* it's assigned to can be
+  bigger, with different faces carving out different sub-windows of the same shared
+  entry via their own distinct offsets.
+
+  Two possible shapes for the fix, in order of how well they preserve normal painting
+  (being able to brush continuously across a real surface like a hull side, not paint
+  disconnected postage stamps one at a time):
+
+  1. **Simplest, but fragments the model**: reuse today's per-face allocation
+     (`find_free_atlas_space()` + `append_tlb_entry()` + `patch_face_texture_id()`, all
+     already built and shipped) for *every* face against the new dedicated library
+     instead of the model's existing shared one. Buildable almost immediately from what
+     exists, but every face becomes its own disconnected little rectangle - painting
+     would jump discontinuously at every face boundary, a real usability problem for
+     someone who (by their own description) isn't an experienced painter and needs
+     forgiving, continuous surfaces to work with, not a mosaic of tiny independent tiles.
+  2. **Real fix, not yet started**: group adjacent/connected faces into UV islands (Smart
+     UV Project's own output already does this), pack each island into one shared `.TLB`
+     entry sized to fit it, and compute *real* per-face corner offsets from each face's
+     actual UV position within that island (not the existing "no crop data, use the
+     entry's full rectangle" fallback, which only handles the all-zero-corners case, not
+     genuine non-uniform per-vertex cropping). This needs a from-scratch "corners from
+     real UV coordinates" writer that doesn't exist anywhere in the codebase yet, plus
+     island-aware packing logic - the two genuinely new pieces of work here.
+
+  Also needs: a fresh, blank/paintable Image datablock at the correct `256×4096` size for
+  the new atlas (trivial - `bpy.data.images.new()` at that resolution), and a check that a
+  whole vehicle's worth of unique surfaces actually fits in that fixed canvas size (should
+  have plenty of headroom for one vehicle, but not verified against a real model yet).
+
 - [ ] **Auto-detect only tries the single best-scoring `.TLB`.** Models that genuinely
   draw from several libraries at once resolve far fewer faces without a `.RRI` present —
   confirmed on a Tiger1 with a `.RRI` listing 9 libraries: 94% resolved via the `.RRI`,
-  only 21% via auto-detect alone (auto-detect found just 1 of the 9).
+  only 21% via auto-detect alone (auto-detect found just 1 of the 9). Real prerequisite
+  for the "private skin" item above - can't start from a complete texture baseline if
+  most of the model's real textures were never found in the first place.
 
 - [ ] **Repaint export path untested against the real game/ObjEdit.** Only checked so far
   via an automated pixel-comparison test inside Blender (painted regions match, untouched
