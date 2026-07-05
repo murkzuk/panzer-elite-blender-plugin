@@ -4,43 +4,44 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
-- [ ] **"Detach face from shared texture cell" operator — 3 of 4 building blocks done.**
-  Real models routinely reuse the exact same `.TLB` atlas rectangle across more than one
-  face (the original artist's own space-saving choice — confirmed on a Panzer IV test
-  model). Since painting acts on the shared atlas image, painting one face necessarily
-  repaints every other face pointing at that same cell too. Confirmed this isn't a plugin
-  bug: it's the same thing as "overlapping UVs" in modern DCC tools (Blender, Substance
-  Painter, etc. all have this exact gotcha), and the real PE/ObjEdit tool would behave
-  identically, since it's genuinely the same underlying pixels either way.
+- [x] **"Detach face from shared texture cell" operator — done 2026-07-05.** Real models
+  routinely reuse the exact same `.TLB` atlas rectangle across more than one face (the
+  original artist's own space-saving choice — confirmed on a Panzer IV test model). Since
+  painting acts on the shared atlas image, painting one face necessarily repaints every
+  other face pointing at that same cell too. Confirmed this isn't a plugin bug: it's the
+  same thing as "overlapping UVs" in modern DCC tools (Blender, Substance Painter, etc.
+  all have this exact gotcha), and the real PE/ObjEdit tool would behave identically,
+  since it's genuinely the same underlying pixels either way.
 
   Ruled out Blender's built-in Smart UV Project as a fix on its own — it has no awareness
   of which atlas regions are already used by other real `.TLB` entries (this model's own
   other faces, or unrelated vehicles sharing the same atlas), so it could just as easily
   relocate a UV onto someone else's texture.
 
-  A real fix needs:
-  1. Find genuinely free space in the atlas's tile-packing grid. **Done** —
-     `find_free_atlas_space()`, verified non-overlapping and in-bounds against every real
-     library in the asset set (98 libraries, multiple sizes each), including a full
-     find→append→write→reread integration check.
-  2. Copy the current cell's pixels there as a starting point (so nothing changes
-     visually until repainted). **Not started** — needs real pixel manipulation on the
-     atlas BMP, most naturally done via Blender's own Image API once this is wired into an
-     operator, rather than a standalone pure-Python utility.
-  3. Allocate a new `.TLB` entry (id/pos/size) for it. **Done** — `append_tlb_entry()`,
-     verified byte-exact against all 98 real `.TLB` files.
-  4. Rewrite that face's `textureOfset` to point at the new region (UV corner bytes stay
-     valid unchanged, since they're offsets *within* the entry, not absolute atlas
-     coordinates). **Done** — `patch_face_texture_id()`, verified against every real model
-     in the asset set (byte-exact except the one intentionally-changed field; re-parses
-     identically through the normal importer otherwise).
+  Shipped as `MESH_OT_pe_detach_face_texture` (Edit Mode face context menu, "PE: Detach
+  Face From Shared Texture Cell") — select the face(s) sharing a cell with something else,
+  run it, and each selected face gets its own private copy of the texture: finds free
+  atlas space (`find_free_atlas_space()`), clones the current cell's pixels there via
+  Blender's Image API, allocates a new `.TLB` entry (`append_tlb_entry()`), repoints the
+  face's `textureOfset` (`patch_face_texture_id()`), and shifts that face's own UVs to the
+  new cell. Writes directly to the model's `.RRF` and `.TLB`, with a one-time `.bak`
+  backup of each made automatically before the first edit.
 
-  This is the same underlying work as "Scenario B" in
+  Verified end-to-end on a real model (not a synthetic test) via the actual registered
+  `bpy.ops` call, using an isolated scratch copy of the asset (never the live files):
+  found two real faces on Pz4H's turret sharing one cell, selected only one, ran the
+  operator, and confirmed all of - the selected face's texture id changed while the
+  unselected sibling's didn't; a new `.TLB` entry appeared with the same size at a
+  different, non-overlapping position while the original entry stayed byte-identical;
+  the new cell's pixels exactly matched the old cell's pre-edit content while the old
+  cell itself was untouched; the selected face's Blender UV shifted to the new cell while
+  the sibling's UV didn't move; and both `.bak` backups were created correctly.
+
+  This covered the same ground as "Scenario B" in
   [`docs/PAINT_AND_EXPORT_SCOPING.md`](docs/PAINT_AND_EXPORT_SCOPING.md) (new texture
-  regions), but scoped narrowly to "clone one face off its current shared cell" rather
-  than general new-content painting. Remaining work is #2 (pixel copy) plus wiring
-  everything together into an actual Blender operator - none of this is exposed in the UI
-  yet, it's all callable-from-Python building blocks so far.
+  regions), scoped narrowly to "clone one face off its current shared cell" rather than
+  general new-content painting - PAINT_AND_EXPORT_SCOPING.md still needs updating to
+  reflect that this specific case is now built.
 
 - [ ] **Auto-detect only tries the single best-scoring `.TLB`.** Models that genuinely
   draw from several libraries at once resolve far fewer faces without a `.RRI` present —

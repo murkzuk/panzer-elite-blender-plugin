@@ -1,6 +1,8 @@
 # Scoping: paint in Blender, export back into a `.TLB`
 
-**Status: Scenario A is built and verified. Scenario B is scoped, not built.**
+**Status: Scenario A is built and verified. Scenario B is largely scoped but not built -
+except for one specific, narrower case ("detach a face from a shared cell") which is now
+built and verified - see below.**
 
 ## Can models be painted in Blender's Texture Paint workspace?
 
@@ -51,28 +53,43 @@ a region in Blender, export, and the output file is pixel-exact — painted pixe
 through correctly, untouched regions are unchanged, file size matches the expected
 24-bit BMP formula exactly (`54 + width×height×3` bytes).
 
-### Scenario B — new texture regions (bigger job, not built)
-
-### Scenario B — new texture regions (bigger job)
+### Scenario B — new texture regions (largely still not built)
 
 Adding genuinely new painted content (a new part variant, or giving previously-magenta
 unresolved faces a real texture for the first time) requires:
 
-1. Finding free space in the atlas's tile-packing grid for a new rectangle.
+1. Finding free space in the atlas's tile-packing grid for a new rectangle. **Built** —
+   `find_free_atlas_space()`.
 2. Allocating a fresh `.TLB` entry (`id`, `posX/posY`, `sizeX/sizeY`) — `libNextID`
-   tracks the next available ID.
-3. Writing that rectangle's pixel data into the atlas.
+   tracks the next available ID. **Built** — `append_tlb_entry()`.
+3. Writing that rectangle's pixel data into the atlas. **Built** for the "clone an
+   existing rectangle's pixels" case (`_copy_atlas_region()`) - not built for genuinely
+   new, freehand-painted content with no existing source rectangle.
 4. **Updating the `.RRF` face records** for the affected faces: `textureOfset` needs the
-   new ID encoded with the correct top-bit/slot convention, and `v1`/`v2`/`v3`/
-   `textureHalf` need the UV corner bytes rewritten to point at the new rectangle
-   (format documented in [RRF_FORMAT.md](RRF_FORMAT.md)).
+   new ID encoded with the correct top-bit/slot convention. **Built** for repointing an
+   *existing* face at a *different* entry of the *same* crop size
+   (`patch_face_texture_id()`) - not built for genuinely new UV corner layouts (`v1`/
+   `v2`/`v3`/`textureHalf`, format documented in [RRF_FORMAT.md](RRF_FORMAT.md)), which
+   would need a real UV-unwrap-to-crop-rectangle step that doesn't exist yet.
 
-This is materially bigger — closer to a small texture-atlas packer plus a `.RRF` mesh
-editor — and would be its own follow-on project, not a quick addition.
+**What this combination of built pieces actually covers**: "detach a face from a shared
+texture cell" (see `TODO.md`) - giving an existing face, whose UVs and crop rectangle are
+already valid, its own independent copy of the *same* content so it stops sharing a cell
+with unrelated faces. Shipped as `MESH_OT_pe_detach_face_texture` (Edit Mode face context
+menu). Verified end-to-end on a real model: detaching one of two faces sharing a cell
+changes only the selected face's texture reference and UV, leaves the sibling and the
+original entry completely untouched, and the cloned cell's pixels match exactly.
+
+**What's still not covered**: assigning a *previously-unresolved* (magenta) face a real
+texture for the first time, or painting content that doesn't already exist as a croppable
+rectangle somewhere. Both of those need real UV unwrapping into a newly-allocated
+rectangle - a materially bigger piece of work than reusing an existing crop, and not
+started.
 
 ## Recommendation
 
 Scenario A is done and covers the most common modding use case (re-skinning an existing
-vehicle) without touching mesh/UV data at all. Scenario B remains a candidate follow-on
-once there's a concrete need for genuinely new texture layouts rather than repainting
-existing ones.
+vehicle) without touching mesh/UV data at all. Within Scenario B, "detach face from
+shared cell" is done and covers a second real, if narrower, case. Full Scenario B (new
+UV layouts for previously-unresolved or freehand-painted content) remains a candidate
+follow-on once there's a concrete need for it.

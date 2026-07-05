@@ -1,15 +1,16 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 3, 0),
+    "version": (0, 4, 0),
     "blender": (3, 6, 0),
-    "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp)",
-    "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game.",
+    "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode face context menu > PE: Detach Face From Shared Texture Cell",
+    "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, and detach individual faces from a shared texture cell onto their own independent copy.",
     "category": "Import-Export",
 }
 
 import struct
 import os
+import shutil
 import bpy
 import bmesh
 from bpy_extras.io_utils import ImportHelper, ExportHelper
@@ -447,9 +448,10 @@ def resolve_rri_libraries(rri_slots, rrf_filepath):
     """rri_slots' paths (e.g. "texture\\CustomB1.TLB") are relative to the pack's install
     root, and the .RRF itself lives at <root>\\<PackFolder>\\Model.RRF, so the natural root
     is the .RRF's own parent directory. Falls back to the .RRF's own directory in case the
-    pack layout differs. Returns {slot_index: (tlb_parts, atlas_image_path)} for whichever
-    slots actually resolve to a real file on disk - slots that don't (moved/renamed/missing
-    library) are silently dropped rather than failing the whole import.
+    pack layout differs. Returns {slot_index: (tlb_parts, atlas_image_path, tlb_filepath)}
+    for whichever slots actually resolve to a real file on disk - slots that don't
+    (moved/renamed/missing library) are silently dropped rather than failing the whole
+    import.
     """
     rrf_dir = os.path.dirname(os.path.abspath(rrf_filepath))
     candidate_roots = [os.path.dirname(rrf_dir), rrf_dir]
@@ -464,7 +466,7 @@ def resolve_rri_libraries(rri_slots, rrf_filepath):
                     tlb_parts = read_tlb(abs_path)
                 except Exception:
                     continue
-                resolved[slot] = (tlb_parts, find_atlas_image(abs_path))
+                resolved[slot] = (tlb_parts, find_atlas_image(abs_path), abs_path)
                 break
     return resolved
 
@@ -692,8 +694,14 @@ def detect_add_pivot_convention(parts):
     return {part.index: True for part in parts[1:] if part.vertices}
 
 
-def _build_material(root_name, image_path):
+def _build_material(root_name, image_path, tlb_filepath=None):
     image = bpy.data.images.load(image_path, check_existing=True)
+    if tlb_filepath:
+        # Lets face-level operators (e.g. "detach face from shared texture cell", see
+        # TODO.md) find their way from a material's image back to the .TLB it came from,
+        # without re-deriving it from the image filename (fragile - real files mix
+        # .TLB/.tlb casing, and the _8.BMP/_24.BMP suffix-stripping isn't foolproof).
+        image["pe_tlb_filepath"] = tlb_filepath
     material = bpy.data.materials.new(root_name + "_mat")
     material.use_nodes = True
     bsdf = material.node_tree.nodes.get("Principled BSDF")
@@ -746,11 +754,15 @@ def _recalculate_normals(mesh):
     bm.free()
 
 
-def build_blender_objects(parts, collection, root_name, slot_sources=None):
-    """slot_sources: {slot_index: (tlb_parts, atlas_image_path)} or None for geometry-only
-    import. A model can use several libraries at once (one per slot) - each gets its own
-    material, built once here and shared across every part/mesh, since the same slot
-    assignments apply model-wide."""
+def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_filepath=None):
+    """slot_sources: {slot_index: (tlb_parts, atlas_image_path, tlb_filepath)} or None for
+    geometry-only import. A model can use several libraries at once (one per slot) - each
+    gets its own material, built once here and shared across every part/mesh, since the
+    same slot assignments apply model-wide.
+
+    rrf_filepath (optional): stamped onto every created object as `pe_rrf_filepath`, so a
+    face-level operator working on the resulting mesh can find its way back to the source
+    .RRF - same purpose as `_build_material()`'s `pe_tlb_filepath` on the Image."""
     slot_to_parts = {}
     slot_to_material = {}
     atlas_path_to_material = {}
@@ -758,14 +770,14 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None):
 
     if slot_sources:
         unresolved_material = _build_unresolved_material()
-        for slot, (tlb_parts, atlas_image_path) in slot_sources.items():
+        for slot, (tlb_parts, atlas_image_path, tlb_filepath) in slot_sources.items():
             slot_to_parts[slot] = tlb_parts
             if not atlas_image_path:
                 continue
             material = atlas_path_to_material.get(atlas_image_path)
             if material is None:
                 label = os.path.splitext(os.path.basename(atlas_image_path))[0]
-                material = _build_material(f"{root_name}_{label}", atlas_image_path)
+                material = _build_material(f"{root_name}_{label}", atlas_image_path, tlb_filepath)
                 atlas_path_to_material[atlas_image_path] = material
             slot_to_material[slot] = material
 
@@ -854,6 +866,8 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None):
         obj["pe_obj_attribut"] = hex(part.obj_attribut)
         obj["pe_type_id"] = type_id
         obj["pe_type_name"] = OBJ_TYPE_NAMES.get(type_id, "UNKNOWN")
+        if rrf_filepath:
+            obj["pe_rrf_filepath"] = rrf_filepath
 
         collection.objects.link(obj)
         # hide_set() needs the object linked into the view layer first, hence linking
@@ -960,7 +974,7 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
                 if atlas_image_path is None:
                     self.report({"WARNING"}, "No matching _24.BMP/_8.BMP found next to the .TLB - importing geometry only")
                 else:
-                    slot_sources = {0: (tlb_parts, atlas_image_path)}
+                    slot_sources = {0: (tlb_parts, atlas_image_path, self.tlb_filepath)}
             except Exception as e:
                 self.report({"WARNING"}, f"Could not read .TLB ({e}) - importing geometry only")
         elif self.use_rri and find_rri_path(self.filepath):
@@ -990,14 +1004,14 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
                     if atlas_image_path is None:
                         self.report({"WARNING"}, f"Best TLB match {best_path} has no matching _24.BMP/_8.BMP - importing geometry only")
                     else:
-                        slot_sources = {0: (tlb_parts, atlas_image_path)}
+                        slot_sources = {0: (tlb_parts, atlas_image_path, best_path)}
 
         root_name = os.path.splitext(os.path.basename(self.filepath))[0]
         collection = bpy.data.collections.new(root_name)
         context.scene.collection.children.link(collection)
 
         objects, resolved_count, unresolved_count = build_blender_objects(
-            parts, collection, root_name, slot_sources
+            parts, collection, root_name, slot_sources, rrf_filepath=self.filepath
         )
 
         msg = f"Imported {len(parts)} part(s) from {root_name}.rrf" + detect_msg
@@ -1088,16 +1102,206 @@ def menu_func_export(self, context):
     self.layout.operator(EXPORT_OT_rrf_atlas.bl_idname, text="Panzer Elite Texture Atlas (.bmp)")
 
 
+def _backup_once(filepath):
+    """Copies filepath to filepath+'.bak' the first time this is called for it in a
+    session where no .bak already exists - a one-time safety net before an operator
+    writes over a real .RRF/.TLB in place, without repeatedly clobbering the backup on
+    every subsequent edit (it should always reflect the state before ANY of this
+    session's changes, not a rolling backup)."""
+    backup_path = filepath + ".bak"
+    if not os.path.isfile(backup_path):
+        shutil.copy2(filepath, backup_path)
+
+
+def _copy_atlas_region(image, old_posX, old_posY, new_posX, new_posY, sizeX, sizeY):
+    """Copies a sizeX x sizeY pixel block within an atlas Image from one tile-grid
+    position to another, byte-for-byte - used when detaching a face onto a freshly
+    allocated .TLB entry, so the new cell starts out looking identical to the old one
+    (only actually changes once repainted).
+
+    Blender's own Image.pixels array is stored bottom-up (index 0 = image's bottom row),
+    while posX/posY and the UV math in build_blender_objects() use a top-down "atlas_y"
+    convention (see its `v = 1.0 - atlas_y / ATLAS_HEIGHT`) - each row is converted
+    between the two independently here via `h - 1 - atlas_y`, so this is correct
+    regardless of how far the block moves or in which direction."""
+    import numpy as np
+
+    w, h = image.size
+    pixels = np.empty(w * h * 4, dtype=np.float32)
+    image.pixels.foreach_get(pixels)
+    pixels = pixels.reshape(h, w, 4)
+
+    for dy in range(sizeY):
+        src_row = h - 1 - (old_posY * ATLAS_TILE_SIZE + dy)
+        dst_row = h - 1 - (new_posY * ATLAS_TILE_SIZE + dy)
+        src_col = old_posX * ATLAS_TILE_SIZE
+        dst_col = new_posX * ATLAS_TILE_SIZE
+        pixels[dst_row, dst_col:dst_col + sizeX, :] = pixels[src_row, src_col:src_col + sizeX, :]
+
+    image.pixels.foreach_set(pixels.reshape(-1))
+    image.update()
+
+
+class MESH_OT_pe_detach_face_texture(bpy.types.Operator):
+    """Gives the selected face(s) their own private copy of the shared texture cell they
+    currently point at, so repainting them no longer also repaints every other face that
+    happens to share the same .TLB entry - the "detach face from shared texture cell"
+    feature from TODO.md, wiring together find_free_atlas_space(), append_tlb_entry(),
+    and patch_face_texture_id().
+
+    Writes directly to the model's .RRF and whichever .TLB library the selected face(s)
+    resolved through, with a one-time .bak backup made automatically before the first
+    edit to either file this session (see _backup_once()) - this is a real, hard-to-
+    reverse-by-hand edit to the actual asset files, not just an in-memory Blender change.
+    """
+    bl_idname = "mesh.pe_detach_face_texture"
+    bl_label = "PE: Detach Face From Shared Texture Cell"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (
+            obj is not None
+            and obj.type == "MESH"
+            and obj.mode == "EDIT"
+            and "pe_rrf_filepath" in obj
+            and "pe_part_index" in obj
+        )
+
+    def execute(self, context):
+        obj = context.active_object
+        mesh = obj.data
+        rrf_filepath = obj["pe_rrf_filepath"]
+        part_index = obj["pe_part_index"]
+
+        bm = bmesh.from_edit_mesh(mesh)
+        selected_faces = [f for f in bm.faces if f.select]
+        if not selected_faces:
+            self.report({"WARNING"}, "No faces selected")
+            return {"CANCELLED"}
+
+        uv_layer = bm.loops.layers.uv.active
+        if uv_layer is None:
+            self.report({"ERROR"}, "Mesh has no UV layer - nothing to detach")
+            return {"CANCELLED"}
+
+        try:
+            rrf_data = read_rrf_raw(rrf_filepath)
+        except OSError as e:
+            self.report({"ERROR"}, f"Could not read {rrf_filepath}: {e}")
+            return {"CANCELLED"}
+
+        tlb_cache = {}   # tlb_filepath -> TLBLibrary, loaded once and written once at the end
+        tlb_dirty = set()
+        detached_count = 0
+        skipped_count = 0
+
+        for face in selected_faces:
+            face_index = face.index
+            try:
+                old_texture_id = read_face_texture_id(rrf_data, part_index, 0, face_index)
+            except (IndexError, struct.error):
+                skipped_count += 1
+                continue
+
+            material_index = face.material_index
+            if material_index >= len(mesh.materials) or mesh.materials[material_index] is None:
+                skipped_count += 1
+                continue
+            material = mesh.materials[material_index]
+            image = next(
+                (n.image for n in material.node_tree.nodes if n.type == "TEX_IMAGE" and n.image is not None),
+                None,
+            ) if material.use_nodes else None
+            if image is None or "pe_tlb_filepath" not in image:
+                self.report({"WARNING"}, f"Face {face_index}: material has no traceable .TLB source - skipped")
+                skipped_count += 1
+                continue
+            tlb_filepath = image["pe_tlb_filepath"]
+
+            library = tlb_cache.get(tlb_filepath)
+            if library is None:
+                try:
+                    library = read_tlb_library(tlb_filepath)
+                except (OSError, ValueError) as e:
+                    self.report({"WARNING"}, f"Face {face_index}: could not read {tlb_filepath}: {e}")
+                    skipped_count += 1
+                    continue
+                tlb_cache[tlb_filepath] = library
+
+            old_entry_id = old_texture_id % TLB_MAX_PARTS
+            old_entry = next((e for e in library.entries if e.id == old_entry_id), None)
+            if old_entry is None:
+                self.report({"WARNING"}, f"Face {face_index}: texture id {old_texture_id} doesn't resolve to any entry in {tlb_filepath} - skipped")
+                skipped_count += 1
+                continue
+
+            free = find_free_atlas_space(library, old_entry.sizeX, old_entry.sizeY)
+            if free is None:
+                self.report({"WARNING"}, f"Face {face_index}: no free {old_entry.sizeX}x{old_entry.sizeY} space left in {tlb_filepath} - skipped")
+                skipped_count += 1
+                continue
+            new_posX, new_posY = free
+
+            new_id = append_tlb_entry(
+                library, sizeX=old_entry.sizeX, sizeY=old_entry.sizeY,
+                posX=new_posX, posY=new_posY, cutX=old_entry.cutX, cutY=old_entry.cutY,
+                filename=old_entry.filename,
+            )
+            tlb_dirty.add(tlb_filepath)
+
+            _copy_atlas_region(image, old_entry.posX, old_entry.posY, new_posX, new_posY, old_entry.sizeX, old_entry.sizeY)
+
+            patch_face_texture_id(rrf_data, part_index, 0, face_index, new_id)
+
+            # Only this face's UV needs shifting to the new cell - the pixel offsets
+            # *within* the cell (what the corners actually encode, see RRF_FORMAT.md)
+            # don't change, only the cell's own base position does.
+            delta_u = (new_posX - old_entry.posX) * ATLAS_TILE_SIZE / ATLAS_WIDTH
+            delta_v = -(new_posY - old_entry.posY) * ATLAS_TILE_SIZE / ATLAS_HEIGHT
+            for loop in face.loops:
+                uv = loop[uv_layer].uv
+                loop[uv_layer].uv = (uv.x + delta_u, uv.y + delta_v)
+
+            detached_count += 1
+
+        if detached_count:
+            _backup_once(rrf_filepath)
+            write_rrf_raw(rrf_filepath, rrf_data)
+            for dirty_path in tlb_dirty:
+                _backup_once(dirty_path)
+                write_tlb_library(dirty_path, tlb_cache[dirty_path])
+            bmesh.update_edit_mesh(mesh)
+
+        msg = f"Detached {detached_count} face(s) onto their own texture cell(s)"
+        if skipped_count:
+            msg += f", skipped {skipped_count}"
+        if detached_count:
+            self.report({"INFO"}, msg)
+            return {"FINISHED"}
+        self.report({"WARNING"}, msg or "Nothing detached")
+        return {"CANCELLED"}
+
+
+def menu_func_detach_face(self, context):
+    self.layout.operator(MESH_OT_pe_detach_face_texture.bl_idname, icon="TEXTURE")
+
+
 def register():
     bpy.utils.register_class(IMPORT_OT_rrf)
     bpy.utils.register_class(EXPORT_OT_rrf_atlas)
+    bpy.utils.register_class(MESH_OT_pe_detach_face_texture)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
+    bpy.types.VIEW3D_MT_edit_mesh_context_menu.append(menu_func_detach_face)
 
 
 def unregister():
+    bpy.types.VIEW3D_MT_edit_mesh_context_menu.remove(menu_func_detach_face)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+    bpy.utils.unregister_class(MESH_OT_pe_detach_face_texture)
     bpy.utils.unregister_class(EXPORT_OT_rrf_atlas)
     bpy.utils.unregister_class(IMPORT_OT_rrf)
 

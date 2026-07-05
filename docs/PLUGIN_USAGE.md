@@ -96,7 +96,40 @@ the expected 256×4096 size) — nobody has actually loaded an exported file in 
 the game yet to confirm it's accepted and displays correctly.
 
 Adding brand new texture regions (new UV layout, new `.TLB` entries) isn't supported —
-see Scenario B in [PAINT_AND_EXPORT_SCOPING.md](PAINT_AND_EXPORT_SCOPING.md).
+see Scenario B in [PAINT_AND_EXPORT_SCOPING.md](PAINT_AND_EXPORT_SCOPING.md). One specific
+case *is* supported now, though - see below.
+
+## Detach a face from a shared texture cell
+
+Some models reuse the exact same `.TLB` atlas rectangle across more than one face (the
+original artist's own space-saving choice) - painting one repaints every other face that
+happens to share it, since they're all genuinely looking at the same pixels. To give a
+face its own independent copy of the same content:
+
+1. Enter Edit Mode on the model, switch to face select, and select the face(s) you want
+   to detach.
+2. Right-click for the face context menu (or a properties panel, if you've added one) and
+   choose **PE: Detach Face From Shared Texture Cell** - operator id
+   `mesh.pe_detach_face_texture`.
+
+```python
+bpy.ops.mesh.pe_detach_face_texture()
+```
+
+Each selected face gets its own newly-allocated `.TLB` entry (same size as whatever it was
+using, populated with a copy of that same content) and its own UV, so it stops sharing a
+cell with anything else. Everything else in the model - the untouched original entry, any
+other face still using it, every other byte in the file - is left exactly as it was.
+
+**This writes directly to the model's `.RRF` and whichever `.TLB` it resolved through** -
+a real, hard-to-reverse-by-hand edit to the actual asset files, not just an in-memory
+Blender change. A one-time `.bak` backup of each file is made automatically before the
+first edit in a session (it won't overwrite an existing `.bak` on later edits, so it
+always reflects the state from before any of this session's changes).
+
+Only covers faces that already resolved a texture (see above) - a magenta/unresolved face
+has no real crop rectangle to clone, so there's nothing to detach it onto. Doesn't touch
+`.RRI` files.
 
 ## Known limitations
 

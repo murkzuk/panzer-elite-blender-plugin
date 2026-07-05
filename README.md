@@ -47,13 +47,22 @@ Checked so far only via an automated pixel comparison of the round-tripped file 
 regions match, untouched regions match, correct format/size) — **not yet tested by
 loading an export in the real game or ObjEdit.**
 
-`.TLB` writing (a building block toward Scenario B and the longer-term goal of full
-ObjEdit parity - see [`TODO.md`](TODO.md)): `read_tlb_library()`/`write_tlb_library()`
-round-trip every real `.TLB` file checked (98 of 98) byte-for-byte, and
-`append_tlb_entry()` can add a new entry to an existing library with a correctly assigned
-id. Not yet wired into any menu/operator, and doesn't yet touch the `.RRF` side (a face
-still needs its own record rewritten to actually point at a new entry) or find free space
-in the atlas image itself - see the scoping doc for what's still open.
+**Detach a face from a shared texture cell** (Edit Mode face context menu, or
+`bpy.ops.mesh.pe_detach_face_texture()`): some models reuse the exact same `.TLB`
+rectangle across more than one face, so painting one repaints every face sharing it. This
+gives selected face(s) their own independent copy of the same content - see
+[`docs/PLUGIN_USAGE.md`](docs/PLUGIN_USAGE.md) for how to use it. Verified end-to-end on
+a real model via the actual operator call. Writes directly to the model's `.RRF` and
+`.TLB`, with an automatic one-time `.bak` backup of each before the first edit.
+
+This is one real step toward the longer-term goal of full ObjEdit parity (see
+[`TODO.md`](TODO.md)) - the underlying `.TLB`/`.RRF` writers it's built from
+(`read_tlb_library()`/`write_tlb_library()`/`append_tlb_entry()`,
+`patch_face_texture_id()`, `find_free_atlas_space()`) are real, tested building blocks,
+not a one-off. What's still not built: assigning a previously-unresolved face a texture
+for the first time, or genuinely new freehand-painted content (both need real UV
+unwrapping, not just relocating an existing crop) - see
+[`docs/PAINT_AND_EXPORT_SCOPING.md`](docs/PAINT_AND_EXPORT_SCOPING.md).
 
 ## Requirements
 
