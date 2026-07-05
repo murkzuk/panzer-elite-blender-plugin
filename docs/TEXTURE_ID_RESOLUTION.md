@@ -24,6 +24,14 @@ whichever `.TLB` the face actually references — no matter how large `texture_i
 is, or how many times the tool's internal "slot" counter had wrapped around when the face
 was painted.
 
+The "32 possible library slots" figure isn't a guess either — independently confirmed via
+historical PEDG community discussion as a real, hard runtime limit on how many `.TLB`
+libraries the original editor could have loaded simultaneously (an earlier tool version
+was limited to 8). That same discussion is what originally motivated packing extra
+addressing into `textureOfset`'s otherwise-unused upper bits in the first place — this
+repo's modulo-based resolution is a from-scratch reverse-engineered match for that same
+mechanism, not a coincidence.
+
 **This corrects an earlier version of this doc and an earlier version of the importer**,
 which capped the search at slots 0-31 (`texture_id - slot*4096` for `slot` in `0..31`)
 and treated anything larger as an unrecoverable runtime value. That cap was simply wrong

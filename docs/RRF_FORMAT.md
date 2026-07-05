@@ -177,6 +177,12 @@ Combined with the resolved library entry's atlas position (see
 [TLB_FORMAT.md](TLB_FORMAT.md)), this gives a full UV mapping into the shared texture
 atlas with no cropping or per-part image needed.
 
+Each corner byte being single-precision (0–255) means any one face's own crop can never
+exceed 256×256 pixels — this is a hard structural consequence of the field width, not a
+choice. Independently confirmed via historical PEDG community discussion as the real,
+intentional design limit (minimum crop size 16×16, maximum 256×256) — the format
+reverse-engineering here and the original design constraint agree exactly.
+
 ### Writing: surgical patches, not a full reconstruction
 
 Unlike `.TLB` (a simple fixed-size array - see `write_tlb_library()` in

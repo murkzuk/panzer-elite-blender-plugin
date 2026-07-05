@@ -94,5 +94,17 @@ two — confirmed by reading the actual BMP header dimensions, and cross-checked
 the `16`-wide × `256`-tall tile-grid constants used by the original editor
 (`16 × 16px = 256`, `256 × 16px = 4096`).
 
+**Independently confirmed via historical PEDG community discussion**, not just measured
+from files: the `256×4096` figure is exactly "16 stacked `256×256` blocks" (`16 × 256 =
+4096`) — the community's own convention was to lay a library out as 16 full-width
+`256×256` textures end to end down the atlas, one full-width block at a time, rather than
+packing many small crops freely. The same discussion put the practical crop-size limits at
+a minimum of `16×16` and maximum of `256×256` pixels — matching this repo's own
+independent derivation of the same `256×256` cap from the single-byte (0–255) UV corner
+offsets in `.RRF` face records (see [RRF_FORMAT.md](RRF_FORMAT.md)) — and confirmed a
+hard runtime limit of 32 texture libraries loaded at once (8 in an earlier tool version),
+consistent with why `textureOfset`'s "implied slot" scheme exists in the first place (see
+[TEXTURE_ID_RESOLUTION.md](TEXTURE_ID_RESOLUTION.md)).
+
 To get a part's actual pixels: crop the atlas bitmap at
 `(posX × 16, posY × 16, sizeX, sizeY)`.
