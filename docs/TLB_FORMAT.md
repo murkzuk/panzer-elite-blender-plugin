@@ -59,6 +59,28 @@ byte-exact round trip, neither obvious just from reading the format):
   a "disabled/deprecated asset" naming convention seen elsewhere in this asset set, so
   this is a leftover corrupted/superseded file, not a genuine format variant to support.
 
+## Finding free space in the atlas
+
+`find_free_atlas_space()` scans a library's entries for an unused rectangle big enough
+for a new entry, needed before `append_tlb_entry()` can place genuinely new content
+rather than just overwriting an existing crop. Confirmed against all 25,614 real entries
+checked across the whole asset set:
+
+- Every one has `sizeX`/`sizeY` as an exact multiple of the atlas's 16px tile (0
+  exceptions) - the grid really is 16 columns × 256 rows, matching `ImageLibUnit.pas`'s
+  `MAX_X=15`/`MAX_Y=255` tile-grid constants exactly (measured, not assumed: max `posX`
+  seen was 15, max `posY` seen was 254).
+- A small number of entries (about 1 in 2,500) claim a size or position that doesn't
+  actually fit that grid at all - one real entry claims `sizeX=1120`px, wider than the
+  entire 256px atlas. Nonsensical claims like this can't reliably indicate real occupied
+  space, so the free-space search skips them rather than treating them as blocking.
+- At least one real library (`CustomA14.TLB`) has two entries that genuinely overlap each
+  other in-bounds - almost certainly a stale/superseded entry whose old space was later
+  reused by something newer, with the old record never cleaned up (the same "real files
+  don't tidy up after themselves" pattern as the writer wrinkles above). No special
+  handling needed for this beyond marking both entries' tiles occupied - a tile claimed by
+  more than one entry is still just occupied.
+
 ## The shared atlas bitmap
 
 Every `.TLB` has a companion bitmap with the same base name: `<name>_24.BMP` (24-bit

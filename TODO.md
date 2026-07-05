@@ -4,7 +4,7 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
-- [ ] **"Detach face from shared texture cell" operator — 2 of 4 building blocks done.**
+- [ ] **"Detach face from shared texture cell" operator — 3 of 4 building blocks done.**
   Real models routinely reuse the exact same `.TLB` atlas rectangle across more than one
   face (the original artist's own space-saving choice — confirmed on a Panzer IV test
   model). Since painting acts on the shared atlas image, painting one face necessarily
@@ -19,9 +19,14 @@ Running list of things flagged during work sessions, not yet done. Newest first.
   relocate a UV onto someone else's texture.
 
   A real fix needs:
-  1. Find genuinely free space in the atlas's tile-packing grid. **Not started.**
+  1. Find genuinely free space in the atlas's tile-packing grid. **Done** —
+     `find_free_atlas_space()`, verified non-overlapping and in-bounds against every real
+     library in the asset set (98 libraries, multiple sizes each), including a full
+     find→append→write→reread integration check.
   2. Copy the current cell's pixels there as a starting point (so nothing changes
-     visually until repainted). **Not started** (needs #1 first).
+     visually until repainted). **Not started** — needs real pixel manipulation on the
+     atlas BMP, most naturally done via Blender's own Image API once this is wired into an
+     operator, rather than a standalone pure-Python utility.
   3. Allocate a new `.TLB` entry (id/pos/size) for it. **Done** — `append_tlb_entry()`,
      verified byte-exact against all 98 real `.TLB` files.
   4. Rewrite that face's `textureOfset` to point at the new region (UV corner bytes stay
@@ -33,9 +38,9 @@ Running list of things flagged during work sessions, not yet done. Newest first.
   This is the same underlying work as "Scenario B" in
   [`docs/PAINT_AND_EXPORT_SCOPING.md`](docs/PAINT_AND_EXPORT_SCOPING.md) (new texture
   regions), but scoped narrowly to "clone one face off its current shared cell" rather
-  than general new-content painting. Remaining work is the atlas free-space search (#1/#2)
-  plus wiring #3/#4 together into an actual Blender operator - none of this is exposed in
-  the UI yet, it's all callable-from-Python building blocks so far.
+  than general new-content painting. Remaining work is #2 (pixel copy) plus wiring
+  everything together into an actual Blender operator - none of this is exposed in the UI
+  yet, it's all callable-from-Python building blocks so far.
 
 - [ ] **Auto-detect only tries the single best-scoring `.TLB`.** Models that genuinely
   draw from several libraries at once resolve far fewer faces without a `.RRI` present —

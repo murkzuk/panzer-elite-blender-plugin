@@ -259,6 +259,66 @@ def append_tlb_entry(library, sizeX, sizeY, posX, posY, cutX=0, cutY=0, filename
     return entry.id
 
 
+ATLAS_TILE_SIZE = 16
+ATLAS_GRID_WIDTH = ATLAS_WIDTH // ATLAS_TILE_SIZE    # 16 tile columns
+ATLAS_GRID_HEIGHT = ATLAS_HEIGHT // ATLAS_TILE_SIZE  # 256 tile rows
+
+
+def find_free_atlas_space(library, sizeX, sizeY):
+    """Finds an unused posX/posY (tile-grid units, per TLB_FORMAT.md) in `library`'s atlas
+    big enough for a new sizeX x sizeY (pixels) entry, without overlapping any existing
+    entry. Needed for the "detach face from shared texture cell" feature (TODO.md) - once
+    append_tlb_entry() has an id, it still needs somewhere real in the shared atlas image
+    to actually live.
+
+    Confirmed against all 25,614 real entries checked across the asset set: every one has
+    sizeX/sizeY as an exact multiple of the 16px tile (0 exceptions) and the grid really is
+    16 columns x 256 rows (max posX seen: 15, max posY seen: 254) - matching ImageLibUnit
+    .pas's MAX_X=15/MAX_Y=255 constants exactly, so this isn't guessed, it's measured.
+
+    Deliberately tolerant of two rare-but-real oddities rather than raising on them:
+    - A handful of entries (about 1 in 2500) claim a size/position that doesn't actually
+      fit the 16x256 grid at all (e.g. one real entry claims sizeX=1120px, wider than the
+      entire 256px-wide atlas). Nonsensical claims like this can't reliably tell us
+      anything about real occupied space, so they're skipped rather than treated as
+      blocking an otherwise-free area.
+    - At least one real library (CustomA14.TLB) has entries that genuinely overlap each
+      other in-bounds - almost certainly a stale/superseded entry whose old space was
+      later reused by something newer, with the old record never cleaned up (the same
+      "real files don't tidy up after themselves" pattern found while building the .TLB
+      writer). Both entries' claimed tiles are simply marked occupied; no special handling
+      needed since a tile occupied by more than one entry is still just occupied.
+
+    Returns (posX, posY) in tile-grid units, or None if no free space of the requested
+    size exists anywhere in the atlas."""
+    if sizeX <= 0 or sizeY <= 0 or sizeX % ATLAS_TILE_SIZE or sizeY % ATLAS_TILE_SIZE:
+        raise ValueError(f"sizeX/sizeY ({sizeX}x{sizeY}) must be positive multiples of {ATLAS_TILE_SIZE}")
+
+    tiles_w = sizeX // ATLAS_TILE_SIZE
+    tiles_h = sizeY // ATLAS_TILE_SIZE
+    if tiles_w > ATLAS_GRID_WIDTH or tiles_h > ATLAS_GRID_HEIGHT:
+        return None
+
+    occupied = set()
+    for entry in library.entries:
+        if entry.sizeX <= 0 or entry.sizeY <= 0 or entry.sizeX % ATLAS_TILE_SIZE or entry.sizeY % ATLAS_TILE_SIZE:
+            continue  # nonsensical size, can't reliably mark any tiles - see docstring
+        etw = entry.sizeX // ATLAS_TILE_SIZE
+        eth = entry.sizeY // ATLAS_TILE_SIZE
+        if entry.posX < 0 or entry.posY < 0 or entry.posX + etw > ATLAS_GRID_WIDTH or entry.posY + eth > ATLAS_GRID_HEIGHT:
+            continue  # doesn't fit the real grid at all - see docstring
+        for tx in range(entry.posX, entry.posX + etw):
+            for ty in range(entry.posY, entry.posY + eth):
+                occupied.add((tx, ty))
+
+    for posY in range(ATLAS_GRID_HEIGHT - tiles_h + 1):
+        for posX in range(ATLAS_GRID_WIDTH - tiles_w + 1):
+            if all((posX + dx, posY + dy) not in occupied for dx in range(tiles_w) for dy in range(tiles_h)):
+                return posX, posY
+
+    return None
+
+
 def resolve_texture_id(texture_id, slot_to_parts):
     """slot_to_parts: {key: tlb_parts_dict} (key is just a label to say which library
     matched, e.g. a .RRI slot number - it doesn't need to mean anything to this function).
