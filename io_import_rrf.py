@@ -516,6 +516,76 @@ def read_rrf(filepath):
     return parts
 
 
+def read_rrf_raw(filepath):
+    """Raw file bytes, for use with the surgical-patch functions below - not a full
+    editable in-memory reconstruction the way read_rrf() gives for import.
+
+    Unlike .TLB (a simple fixed-size array - see write_tlb_library()), .RRF's mesh/LOD
+    data is a web of absolute in-file offsets, and several pieces of it (sortList,
+    attribVList, LOD levels above 0, the embedded placeholder texture block) aren't
+    understood well enough yet to safely reconstruct a whole file from scratch without
+    real risk of silently corrupting something. Patching known fields directly in an
+    exact copy of the original file sidesteps that entirely: everything not explicitly
+    touched is guaranteed byte-identical, with no need to understand or rebuild the rest
+    of the format first. A full "rebuild an arbitrary model from scratch" .RRF writer
+    would be a separate, bigger undertaking - this covers targeted edits to an existing,
+    already-valid file.
+    """
+    with open(filepath, "rb") as f:
+        return bytearray(f.read())
+
+
+def write_rrf_raw(filepath, data):
+    with open(filepath, "wb") as f:
+        f.write(data)
+
+
+def _mesh_record_offset(part_index, lod):
+    return HEADER_SIZE + part_index * PART_SIZE + 224 + lod * MESH_SIZE
+
+
+def _face_record_offset(data, part_index, lod, face_index):
+    """Locates one face record's absolute byte offset in a raw .RRF buffer - re-reads the
+    mesh record's own faceCount/faceList fields directly from the file every time (never
+    assumed or cached from a prior read_rrf() call), so this stays correct even if data
+    has already been patched by an earlier call in the same session."""
+    mesh_off = _mesh_record_offset(part_index, lod)
+    faceCount, faceList_off = struct.unpack_from("<II", data, mesh_off + 4)
+    if not (0 <= face_index < faceCount):
+        raise IndexError(
+            f"face_index {face_index} out of range (faceCount={faceCount}) "
+            f"for part {part_index} LOD {lod}"
+        )
+    return faceList_off + face_index * FACE_SIZE
+
+
+def read_face_texture_id(data, part_index, lod, face_index):
+    """Reads a face's resolved texture id straight from a raw buffer, the same way
+    _read_mesh_lod0() does - used to verify patch_face_texture_id() actually took effect,
+    not used by the importer itself (which works from read_rrf()'s parsed RRFPart data)."""
+    off = _face_record_offset(data, part_index, lod, face_index)
+    textureOfset, = struct.unpack_from("<I", data, off + 12)
+    return textureOfset & 0x7FFFFFFF
+
+
+def patch_face_texture_id(data, part_index, lod, face_index, new_texture_id):
+    """Overwrites one face's textureOfset field in place (RRF_FORMAT.md) to point at a
+    different .TLB entry id - the top bit stays set (marking it as a library-entry
+    reference, the same convention _read_mesh_lod0() checks) with the new 31-bit id below
+    it. This is the whole "repoint a face at a new/different texture entry" operation the
+    "detach face from shared cell" feature (see TODO.md) needs on the .RRF side, paired
+    with append_tlb_entry() on the .TLB side.
+
+    Leaves every other byte in the file untouched - including this exact face's own
+    v1/v2/v3/textureHalf UV corner bytes, which stay valid unchanged as long as the new
+    .TLB entry has the same crop size as the old one, since those corners are pixel
+    offsets *within* whichever entry is assigned, not absolute atlas coordinates."""
+    if not (0 <= new_texture_id < 0x80000000):
+        raise ValueError(f"texture id {new_texture_id} doesn't fit in textureOfset's 31 usable bits")
+    off = _face_record_offset(data, part_index, lod, face_index)
+    struct.pack_into("<I", data, off + 12, 0x80000000 | new_texture_id)
+
+
 def _bbox(vertices):
     xs = [v[0] for v in vertices]
     ys = [v[1] for v in vertices]

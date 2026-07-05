@@ -177,6 +177,27 @@ Combined with the resolved library entry's atlas position (see
 [TLB_FORMAT.md](TLB_FORMAT.md)), this gives a full UV mapping into the shared texture
 atlas with no cropping or per-part image needed.
 
+### Writing: surgical patches, not a full reconstruction
+
+Unlike `.TLB` (a simple fixed-size array - see `write_tlb_library()` in
+[TLB_FORMAT.md](TLB_FORMAT.md)), `.RRF`'s mesh/LOD data is a web of absolute in-file
+offsets, and several pieces of it (`sortList`, `attribVList`, LOD levels above 0, the
+embedded placeholder texture block) aren't understood well enough yet to safely
+reconstruct a whole file from scratch - the risk of silently corrupting something not
+fully understood is real. `patch_face_texture_id()` takes the safer, narrower approach
+instead: patch one known field (a face's `textureOfset`) directly in an exact copy of the
+original file, so everything else is *guaranteed* byte-identical without needing to
+understand or rebuild the rest of the format first.
+
+Verified against every real vehicle/prop model in the asset set: a plain "read raw, write
+raw" round trip is byte-identical, and patching one face's texture reference changes only
+that field's own bytes (confirmed via full byte diff) while every other part, vertex,
+face, and UV corner re-parses identically through the normal importer.
+
+A full "rebuild an arbitrary model from scratch" `.RRF` writer (needed for genuinely new
+geometry, not just repointing an existing face at a different texture entry) would be a
+separate, materially bigger undertaking - see `TODO.md`.
+
 **A face whose corner bytes are all literally `(0,0)` was never individually cropped in
 the original tool at all — it's not a genuine "crop to a single pixel" choice.**
 Confirmed on real content: an entire building model had every single one of its
