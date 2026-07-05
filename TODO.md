@@ -46,10 +46,11 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 - [ ] **Give a whole vehicle its own private, freely-paintable skin — scoped 2026-07-05,
   not started. Bigger than "detach face"; needs real new work, not just running that
   operator in bulk.** User's goal: import a model with *every* library it actually uses
-  (see the multi-`.TLB` item below - a real prerequisite for starting from a complete
-  texture baseline, not a nice-to-have), then generate a brand-new, dedicated `.TLB` +
-  atlas used by nothing else, laid out with Blender's own Smart UV Project so the whole
-  model can be painted as a clean canvas with no risk of affecting any other vehicle.
+  (multi-`.TLB` auto-detect is now done, see below - was a real prerequisite for starting
+  from a complete texture baseline, not a nice-to-have), then generate a brand-new,
+  dedicated `.TLB` + atlas used by nothing else, laid out with Blender's own Smart UV
+  Project so the whole model can be painted as a clean canvas with no risk of affecting
+  any other vehicle.
 
   Ruled out one apparent blocker already: Smart UV Project being "unaware of other
   content" (the objection raised against using it for `MESH_OT_pe_detach_face_texture`)
@@ -95,12 +96,30 @@ Running list of things flagged during work sessions, not yet done. Newest first.
   whole vehicle's worth of unique surfaces actually fits in that fixed canvas size (should
   have plenty of headroom for one vehicle, but not verified against a real model yet).
 
-- [ ] **Auto-detect only tries the single best-scoring `.TLB`.** Models that genuinely
-  draw from several libraries at once resolve far fewer faces without a `.RRI` present —
-  confirmed on a Tiger1 with a `.RRI` listing 9 libraries: 94% resolved via the `.RRI`,
-  only 21% via auto-detect alone (auto-detect found just 1 of the 9). Real prerequisite
-  for the "private skin" item above - can't start from a complete texture baseline if
-  most of the model's real textures were never found in the first place.
+- [x] **Auto-detect now tries every library that helps, not just the single
+  best-scoring one — done 2026-07-05.** Models that genuinely draw from several
+  libraries at once used to resolve far fewer faces without a `.RRI` present - a Tiger1
+  with a `.RRI` listing 9 libraries resolved 94% via the `.RRI`, but only 21% via
+  auto-detect (which only tried the single best-scoring library, finding just 1 of the 9).
+
+  Fixed with `find_matching_tlbs()`: scores every `.TLB` in the folder the same way as
+  before (noise-floor-vs-real-match threshold, unrelated libraries score single digits,
+  real matches score well above that), then greedily keeps adding qualifying libraries in
+  score order as long as each one resolves at least one id nothing already-added covers -
+  skips near-duplicate map variants that would only re-cover the same ids.
+
+  Verified via the real `bpy.ops.import_scene.pe_rrf` call across every model in the
+  asset set: `Pz4H_3.RRF` (picked up 2 more libraries) and `PantherG2.RRF` (1 more) both
+  went from already-good (91.0%/99.8%) to fully resolved (100%/100%), and Tiger1 improved
+  21%→27% (picked up a real second library, though most of its `.RRI`'s 9 never score
+  high enough above the noise floor on their own to be trusted as auto-detect matches).
+  Zero regression on every model that only ever needed one library - identical results
+  to before. This was also a real prerequisite for the "private skin" item above - can't
+  start from a complete texture baseline if most of a model's real textures were never
+  found in the first place.
+
+  **A `.RRI` file is still the better answer when one exists** - it's the authoritative
+  exact list, not a scored guess (see [TEXTURE_ID_RESOLUTION.md](docs/TEXTURE_ID_RESOLUTION.md)).
 
 - [ ] **Repaint export path untested against the real game/ObjEdit.** Only checked so far
   via an automated pixel-comparison test inside Blender (painted regions match, untouched

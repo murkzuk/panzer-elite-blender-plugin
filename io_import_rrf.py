@@ -411,6 +411,70 @@ def find_best_tlb(folder, unique_texture_ids, min_ratio=0.15, min_absolute=3):
     return best_path, best_parts, find_atlas_image(best_path), best_score
 
 
+def find_matching_tlbs(folder, unique_texture_ids, min_ratio=0.15, min_absolute=3):
+    """Like find_best_tlb(), but returns every library worth using instead of just the
+    single best-scoring one - models that genuinely draw from several libraries at once
+    (common on larger/older vehicles) resolve far fewer faces if only one is tried, even
+    when several individually score well above the noise floor. Confirmed on a real
+    Tiger1: its .RRI lists 9 real libraries and resolves 94% of faces using all of them,
+    but auto-detect picking only the single best-scoring one found just 1 of the 9 and
+    only reached 21% (see TODO.md) - the same model, the same folder, just needlessly
+    stopping at one library where several genuinely apply.
+
+    Scores every .TLB in the folder against the *full* unique_texture_ids set first (same
+    noise-floor-vs-real-match threshold as find_best_tlb() - unrelated libraries share a
+    handful of common low IDs, real matches score well above that), then greedily adds
+    qualifying libraries in score order, skipping any that wouldn't resolve at least one
+    id none of the already-added libraries already cover - keeps near-duplicate map
+    variants (e.g. CustomA/CustomB/CustomC copies of the same content) from all being
+    added redundantly just because they happen to share the same generic materials.
+    Stops early once every id is covered.
+
+    Returns a list of (path, tlb_parts, atlas_image_path, score) tuples, in the order
+    libraries were added (best overall match first) - an empty list if nothing scores
+    above the noise floor, same as find_best_tlb() returning (None, None, None, 0).
+    """
+    if not unique_texture_ids:
+        return []
+
+    try:
+        entries = sorted(os.listdir(folder))
+    except OSError:
+        return []
+
+    candidates = [os.path.join(folder, name) for name in entries if name.lower().endswith(".tlb")]
+
+    scored = []
+    for path in candidates:
+        try:
+            tlb_parts = read_tlb(path)
+        except Exception:
+            continue
+        single = {0: tlb_parts}
+        resolved_ids = {
+            tex_id for tex_id in unique_texture_ids if resolve_texture_id(tex_id, single)[0] is not None
+        }
+        if resolved_ids:
+            scored.append((len(resolved_ids), path, tlb_parts, resolved_ids))
+
+    min_score = max(min_absolute, min_ratio * len(unique_texture_ids))
+    scored = [s for s in scored if s[0] >= min_score]
+    scored.sort(key=lambda s: s[0], reverse=True)
+
+    result = []
+    still_unresolved = set(unique_texture_ids)
+    for score, path, tlb_parts, resolved_ids in scored:
+        if not still_unresolved:
+            break
+        newly_covered = resolved_ids & still_unresolved
+        if not newly_covered:
+            continue  # everything this library resolves is already covered by a better-scoring one
+        result.append((path, tlb_parts, find_atlas_image(path), score))
+        still_unresolved -= newly_covered
+
+    return result
+
+
 def read_rri(filepath):
     """Parses the sidecar .RRI file a later ObjEdit build (Alan's export) writes next to a
     .RRF with the same base name. First 16*128 bytes are null-padded ASCII strings, one per
@@ -995,16 +1059,24 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
             auto_derived = not self.tlb_search_folder and search_folder is not None
             if search_folder:
                 unique_ids = sorted({t for part in parts for t in part.face_texture_id if t is not None})
-                best_path, tlb_parts, atlas_image_path, score = find_best_tlb(search_folder, unique_ids)
+                matches = find_matching_tlbs(search_folder, unique_ids)
                 origin_note = " (auto-found sibling Texture folder)" if auto_derived else ""
-                if best_path is None:
+                if not matches:
                     detect_msg = f" - auto-detect{origin_note} found no good TLB match among {len(unique_ids)} unique texture ID(s)"
                 else:
-                    detect_msg = f" - auto-detected {os.path.basename(best_path)}{origin_note} ({score}/{len(unique_ids)} unique IDs matched)"
-                    if atlas_image_path is None:
-                        self.report({"WARNING"}, f"Best TLB match {best_path} has no matching _24.BMP/_8.BMP - importing geometry only")
-                    else:
-                        slot_sources = {0: (tlb_parts, atlas_image_path, best_path)}
+                    built = {}
+                    skipped_no_atlas = []
+                    for slot, (path, tlb_parts, atlas_image_path, score) in enumerate(matches):
+                        if atlas_image_path is None:
+                            skipped_no_atlas.append(os.path.basename(path))
+                            continue
+                        built[slot] = (tlb_parts, atlas_image_path, path)
+                    names = ", ".join(os.path.basename(path) for path, *_ in matches)
+                    detect_msg = f" - auto-detected {len(matches)} .TLB(s){origin_note}: {names}"
+                    if skipped_no_atlas:
+                        self.report({"WARNING"}, f"No matching _24.BMP/_8.BMP for: {', '.join(skipped_no_atlas)} - those libraries skipped")
+                    if built:
+                        slot_sources = built
 
         root_name = os.path.splitext(os.path.basename(self.filepath))[0]
         collection = bpy.data.collections.new(root_name)

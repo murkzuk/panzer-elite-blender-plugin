@@ -38,8 +38,8 @@ built from that documentation.
 
 Import: geometry and part hierarchy with correct pivots are working and verified against
 real models. UV/texture resolution via a `.RRI` sidecar (when present) or best-effort
-auto-detection is largely working, but some texture placement issues are still being
-tracked down.
+auto-detection (now tries every library that helps, not just the single best-scoring
+one) is largely working, but some texture placement issues are still being tracked down.
 
 Export (Scenario A — repainting existing texture assignments): File > Export > Panzer
 Elite Texture Atlas (.bmp) saves a painted-on Image datablock back out as a 24-bit BMP.

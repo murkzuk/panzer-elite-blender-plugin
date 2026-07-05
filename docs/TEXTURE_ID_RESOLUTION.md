@@ -44,20 +44,34 @@ previously-magenta faces (an entire Tiger1 turret, 119/119 faces) to fully resol
    share a handful of common low IDs (generic materials like flat black/green shared
    across every vehicle), so real matches need to score well above that noise floor to be
    trusted — in practice, well over half a model's unique IDs vs. single digits for an
-   unrelated library.
+   unrelated library. `find_matching_tlbs()` scores every library in the folder this way,
+   then greedily keeps adding qualifying libraries (best-scoring first) as long as each
+   one still resolves at least one id nothing already added covers - not just the single
+   best-scoring library (see below).
 
-## Known remaining limitation: auto-detect only tries one library
+## Auto-detect now tries every library that helps, not just the best one
 
-Auto-detect (strategy 3 above) picks the single best-scoring `.TLB` in the search folder.
-That's fine for models that only ever draw from one library, but some models genuinely
-spread their faces across several libraries at once. A Tiger1 model with a `.RRI` listing
-9 separate libraries resolved 94% of its faces when all 9 were used (via the `.RRI`), but
-only 21% when auto-detect was left to guess a single best library — not because the
-extra faces are unrecoverable, but because their real library was never even tried.
+Originally auto-detect only picked the single best-scoring `.TLB` - fine for models that
+only ever draw from one library, but a real problem for models that genuinely spread
+their faces across several at once. A Tiger1 model with a `.RRI` listing 9 separate
+libraries resolved 94% of its faces when all 9 were used (via the `.RRI`), but only 21%
+when auto-detect was left to guess a single best library - not because the extra faces
+were unrecoverable, but because their real library was never even tried.
 
-**Takeaway: prefer a `.RRI` file whenever one is present, especially for larger/older
-vehicle models.** Auto-detect is a reasonable fallback for simpler content (props,
-scenery, single-library vehicles), where it reliably reaches 100%.
+Fixed by having auto-detect keep adding libraries (in score order) as long as each one
+newly resolves something nothing already-selected covers - confirmed real improvement on
+several models with no `.RRI` present: `Pz4H_3.RRF` and `PantherG2.RRF` both went from
+already-good (91.0%/99.8%) to fully resolved (100%/100%) once auto-detect picked up a
+second/third library it wasn't using before, with zero regression on every model that
+only ever needed one library to begin with.
+
+**A `.RRI` file is still the better answer when one exists** - it's the authoritative,
+exact list, not a scored guess. Auto-detect on the same Tiger1 model above (no `.RRI`
+involved) still only reaches 27% even with multi-library support, well short of the
+`.RRI`'s 94% - it correctly picked up a second real library, but 7 of the 9 libraries
+that model's `.RRI` lists never scored high enough above the noise floor to be trusted
+as a genuine match on their own. Auto-detect remains a best-effort fallback, not a
+substitute for a real `.RRI` when one is available.
 
 ## Genuinely unrecoverable faces: much rarer than previously believed
 
