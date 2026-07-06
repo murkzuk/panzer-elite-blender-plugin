@@ -81,6 +81,71 @@ that model's `.RRI` lists never scored high enough above the noise floor to be t
 as a genuine match on their own. Auto-detect remains a best-effort fallback, not a
 substitute for a real `.RRI` when one is available.
 
+## Confidence: how much to trust an auto-detect guess
+
+A single session hit three real cases where trusting a plausible-looking auto-detect
+result turned out wrong, and it was only caught by real in-game testing afterward:
+
+- **Psw232** (Desert_Obj): auto-detect's scoring guessed `Desert5.TLB`, then
+  `CustomB14.TLB` — both wrong. A genuine `.RRI` was needed to reveal the real answer
+  (`Desert1`/`Desert11`).
+- **PantherG** "II01" (Normandy_Obj): the real answer came from a genuine `.RRI` that
+  existed on disk but wasn't found (see the folder-location fix above) — auto-detect
+  never got the chance to be wrong or right here, but would have been asked to guess
+  had the RRI stayed missed.
+- **Pz4E** (Desert_Obj): auto-detect found a clean, unambiguous 100% single-library
+  match, consistent across every theatre copy of the RRF — and it was still the wrong
+  *vehicle*, because the active mod's `units.csv` pointed the "Pz4E" identifier at a
+  different real tank than the file on disk depicts (see
+  [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) — this specific failure mode is a
+  different problem than texture-library scoring and isn't fixable from this file).
+
+This led to checking whether a score-gap heuristic (top candidate clearly ahead of the
+runner-up) could reliably tell a good auto-detect guess from a bad one. It can't:
+scanning 9 real playable vehicles (Pz4h, Pz4E, TigerL, PantherG, Psw232, SPW250MG,
+M4A1, StuG3G, and others) against both this project's current, reduced Texture folder
+and the original, fuller 98-library set showed **every single one** has another library
+scoring within 1-2 unique ids of the top pick. Psw232's own auto-detect guess scored a
+clean-looking 96% with a real gap behind it — and was still wrong once checked against
+its real `.RRI`. This asset library's generic base materials (flat colors, common
+metal/rubber tones) overlap too pervasively across the whole set for a score gap to be
+a reliable signal — not a case where it's sometimes missing, but one where it
+structurally isn't there to find.
+
+Because of this, `find_matching_tlbs()` returns `(matches, confidence, reason)` where
+`confidence` is one of:
+
+- **`"rri"`** — resolved via a real `.RRI` file (same-directory or texture-folder
+  fallback). The authoritative answer; not a scored guess at all.
+- **`"manual"`** — an explicit `tlb_filepath` was supplied by the caller, skipping
+  detection entirely.
+- **`"low"`** — auto-detect's best guess. **Always** `"low"`, regardless of how clean
+  the score looks, per the finding above — `_classify_tlb_confidence()` never returns
+  `"high"` for a pure scoring-based guess, because real testing found no score-based
+  threshold that reliably separates a good guess from a wrong one in this asset
+  library. `reason` still reports the top candidate's resolved percentage and nearest
+  runner-up for context, since that's useful information even though it isn't grounds
+  to call the guess trustworthy.
+
+`IMPORT_OT_rrf.execute()` escalates the operator report to `{"WARNING"}` whenever an
+import went through the `"low"` path, with explicit wording to check a real `.RRI` or
+in-game before trusting the result — instead of the same plain informational message
+whether the match was rock-solid or a coin flip. It also cross-checks the top
+auto-detect candidate against same-named sibling copies in the other theatre
+`PackFolder`s (`CustomA`/`CustomB`/`CustomC`/`Desert_Obj`/`Italy_Obj`/`Normandy_Obj`) via
+`cross_check_tlb_across_variants()`, reporting how consistently it resolves across all
+of them — extra context alongside the confidence label, not a separate trust signal
+(confirmed on Pz4E: cross-check came back a consistent 100%/100% across variants, while
+the real reason for low confidence was five *other* libraries scoring 98% right behind
+the top pick within that one folder — a close-runner-up problem, not a cross-copy
+inconsistency problem, and the two don't imply each other).
+
+The resolution method and confidence are also stamped onto the imported data itself
+(`pe_tlb_confidence` custom property on the atlas Image, alongside the existing
+`pe_tlb_filepath`), so "how sure are we about this texture" stays inspectable later in
+Blender's own UI, not just something that scrolled by in the operator report at import
+time.
+
 ## Genuinely unrecoverable faces: much rarer than previously believed
 
 After the modulo fix, real test content resolves in the 88-100% range per model, with

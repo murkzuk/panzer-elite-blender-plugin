@@ -42,6 +42,25 @@ while the `.RRF`/`.RRI` themselves live at `<root>\<PackFolder>\Model.RRF`. The 
 resolution root is the `.RRF`'s own parent directory; falling back to the `.RRF`'s own
 directory covers installs with a different layout.
 
+### Where the `.RRI` itself can live — it isn't always next to the `.RRF`
+
+`find_rri_path()` originally only checked the same folder as the `.RRF` (`<PackFolder>\
+Model.RRI` beside `<PackFolder>\Model.RRF`). Real content breaks that assumption: a
+genuine, pre-existing `PantherG.RRI` was found sitting directly in the shared
+`Texture\` folder, with **no** `PantherG.RRF` anywhere near it — the model's actual
+`.RRF` lived in `Normandy_Obj\` instead. The importer's own auto-RRI-detection silently
+missed this real, on-disk RRI purely because of where it happened to be saved, and fell
+back to a much less reliable auto-detect guess instead.
+
+Fixed by having `find_rri_path()` accept an optional `texture_folder` argument and also
+check `<texture_folder>\<RRF basename>.RRI` (same case-variant handling as the
+same-directory check). `IMPORT_OT_rrf.execute()` now always passes the model's
+auto-derived sibling `Texture\` folder in, so both locations are checked automatically
+with no extra argument needed on a typical import call. Verified via an isolated
+synthetic test reproducing the exact layout (RRI in a sibling `Texture\`, RRF
+elsewhere) — found correctly with the new parameter, correctly not found without it (no
+regression on the original same-directory case).
+
 ### Everything past the library table
 
 Not fully decoded — appears to be a part-name reference table (matching the `.RRF`'s own

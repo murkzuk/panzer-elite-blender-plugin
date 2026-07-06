@@ -81,19 +81,24 @@ To export: File > Export > Panzer Elite Texture Atlas (.bmp), pick the atlas Ima
 painted (there's a search dropdown), and choose where to save. From the Python console:
 
 ```python
-bpy.ops.export_scene.pe_rrf_atlas(filepath=r"...\Texture\CustomB1_24.bmp", image_name="CustomB1_8.BMP")
+bpy.ops.export_scene.pe_rrf_atlas(filepath=r"...\Texture\CustomB1_8.bmp", image_name="CustomB1_8.BMP")
 ```
 
 This only covers **repainting within the model's existing texture assignments** — no
-`.RRF`/`.TLB` changes, just a replacement 24-bit `.BMP` the game's loader will prefer
-over the paletted `_8.BMP` fallback. Save it as `<name>_24.BMP` next to the `.TLB` for
-the game/ObjEdit to pick it up.
+`.RRF`/`.TLB` changes, just a replacement `_8.BMP`. An earlier version of this operator
+wrote a 24-bit `_24.BMP` instead, on the assumption the game's loader prefers it over
+the paletted `_8.BMP` - confirmed wrong against a real running install (see
+[PAINT_AND_EXPORT_SCOPING.md](PAINT_AND_EXPORT_SCOPING.md)), so it now writes `_8.BMP`
+directly: it reads the model's real, currently-live `_8.BMP` to get its exact palette,
+quantizes your repainted colors against it, and writes a proper 8-bit indexed BMP.
+Repainted colors that don't already exist in the fixed 256-color palette land on their
+closest available match - expected behavior for this format, not a bug. Save it as
+`<name>_8.BMP` next to the `.TLB` for the game to pick it up.
 
-**Not yet tested against the real game or ObjEdit.** What's been checked so far is
-limited to an automated pixel comparison of the round-tripped file (painted regions match
-what was painted, untouched regions match the source, output is a standard 24-bit BMP at
-the expected 256×4096 size) — nobody has actually loaded an exported file in ObjEdit or
-the game yet to confirm it's accepted and displays correctly.
+**Verified byte-level against the real palette/row-order rules this format needs** -
+not yet tested by loading an actual exported file in the real game. See
+[PAINT_AND_EXPORT_SCOPING.md](PAINT_AND_EXPORT_SCOPING.md) for exactly what was checked
+and what's still outstanding.
 
 Adding brand new texture regions (new UV layout, new `.TLB` entries) isn't supported —
 see Scenario B in [PAINT_AND_EXPORT_SCOPING.md](PAINT_AND_EXPORT_SCOPING.md). One specific
@@ -138,13 +143,18 @@ has no real crop rectangle to clone, so there's nothing to detach it onto. Doesn
 - Export only covers repainting existing texture assignments (Scenario A) — no new
   `.TLB` entries or `.RRF` changes; see
   [PAINT_AND_EXPORT_SCOPING.md](PAINT_AND_EXPORT_SCOPING.md).
-- Auto-detect (used when there's no `.RRI` and no hand-supplied `.TLB`) only tries the
-  single best-scoring library in the search folder. Models that genuinely draw from
-  several libraries at once (common on larger/older vehicles) will resolve far fewer
-  faces under auto-detect than they would with their real `.RRI` present — this is a
-  real gap in the auto-detect strategy, not a property of the saved data (see
-  [TEXTURE_ID_RESOLUTION.md](TEXTURE_ID_RESOLUTION.md)). Prefer keeping/restoring a
-  model's `.RRI` file whenever one exists.
+- Auto-detect (used when there's no `.RRI` and no hand-supplied `.TLB`) is **always**
+  reported as low confidence, no matter how clean its score looks — real testing found
+  no reliable way to tell a good auto-detect guess from a wrong one by score alone (see
+  [TEXTURE_ID_RESOLUTION.md](TEXTURE_ID_RESOLUTION.md#confidence-how-much-to-trust-an-auto-detect-guess)).
+  A low-confidence import escalates the operator report to a warning and stamps
+  `pe_tlb_confidence = "low"` on the atlas image. Prefer keeping/restoring a model's
+  real `.RRI` file whenever one exists — it's stamped `"rri"` and is the authoritative
+  answer, not a scored guess.
 - A small number of individual texture IDs may still fail to resolve even with the
   correct library — in practice a handful of faces at most, likely stale/removed `.TLB`
   entries rather than a systematic limitation.
+- Even a fully-resolved, high-confidence texture match can still be the wrong *vehicle*
+  or the wrong *specific unit's skin* — see [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)
+  for two real cases (per-unit `.scn Modification` overrides, and mod-dependent model
+  identifiers) that no `.RRF`/`.TLB` analysis can catch.

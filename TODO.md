@@ -4,6 +4,100 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [x] **"The RRF opening in Blender rarely has the correct BMP on it" — texture
+  resolution reliability overhaul, done 2026-07-06.** Explicit user framing after a
+  night of repeated real-world failures: the same underlying problem (guessing the
+  wrong `.TLB`/vehicle, only caught after real in-game testing, never by the plugin
+  itself) kept coming up from different angles across three real cases:
+
+  - **Psw232** (Desert_Obj): auto-detect guessed `Desert5.TLB`, then `CustomB14.TLB` —
+    both wrong. Only a genuine `.RRI` revealed the real answer
+    (`Desert1`/`Desert11`).
+  - **PantherG** "II01" (Normandy_Obj): the real, correct `.RRI` existed on disk all
+    along, but sitting directly in the shared `Texture\` folder rather than next to the
+    `.RRF` — `find_rri_path()` never looked there, so the importer fell back to a
+    worse auto-detect guess despite the authoritative answer being one folder away.
+  - **Pz4E** (Desert_Obj): auto-detect found a clean, unambiguous, cross-variant-
+    consistent 100% match — and was still the wrong *vehicle*, because the active
+    mod's `units.csv` pointed the identifier at a different real tank than the file on
+    disk depicts. This one turned out to be genuinely unfixable at the file level (see
+    [KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md)), not a bug.
+
+  Fixed the two real, fixable gaps:
+
+  1. `find_rri_path()` now also checks `<texture_folder>\<basename>.RRI`, not just
+     next to the `.RRF` — directly fixes the exact bug that bit PantherG. Verified via
+     an isolated synthetic test (RRI in a sibling `Texture\`, RRF elsewhere): found
+     with the new parameter, correctly not found without it.
+  2. `find_matching_tlbs()` now returns `(matches, confidence, reason)`. Originally
+     planned as a score-threshold "high vs. low" split, but scanning 9 real vehicles
+     (Pz4h, Pz4E, TigerL, PantherG, Psw232, SPW250MG, M4A1, StuG3G, and others)
+     against both the current, reduced Texture folder and the original, fuller
+     98-library set showed **every single one** has another library scoring within 1-2
+     unique ids of the top pick — including Psw232's own clean 96%-scoring guess,
+     which was still wrong. No score-based threshold survived contact with real
+     content, so the classifier was recalibrated to be honest instead: auto-detect is
+     now **always** `"low"` confidence, whatever the score looks like; only a real
+     `.RRI` (`"rri"`) or an explicit manual `tlb_filepath` (`"manual"`) earns trust.
+     Added `cross_check_tlb_across_variants()` to report how consistently the top
+     auto-detect guess resolves across sibling theatre-variant copies, as extra
+     context alongside (not a substitute for) the confidence label. Low-confidence
+     imports now escalate the operator report to a `{"WARNING"}` with explicit wording,
+     and stamp `pe_tlb_confidence` onto the atlas Image alongside the existing
+     `pe_tlb_filepath`, so it's inspectable later, not just a message that scrolled by
+     at import time.
+
+  Documented, rather than "fixed," two related but genuinely out-of-scope failure
+  modes (per-unit `.scn Modification` skin overrides; mod-dependent model identifiers)
+  in the new [KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) — no file-level fix is
+  possible for either, since the correct answer lives in mission/mod-state data this
+  plugin was never designed to read.
+
+  See [TEXTURE_ID_RESOLUTION.md](docs/TEXTURE_ID_RESOLUTION.md) for the full
+  confidence-level writeup and [RRI_FORMAT.md](docs/RRI_FORMAT.md) for the RRI
+  location fix.
+
+- [x] **Export writer switched from `_24.BMP` to `_8.BMP` (palette-quantized) — fixed
+  2026-07-05, same session as the failed-test entry below.** Direct fix for the
+  conclusion two entries down: since the real game ignores `_24.BMP` and reads `_8.BMP`
+  regardless, `EXPORT_OT_rrf_atlas` now writes that format instead. Added
+  `find_source_bmp8()` (locates the model's real, currently-live `_8.BMP` via the
+  Image's `pe_tlb_filepath` custom property - deliberately distinct from
+  `find_atlas_image()`, which prefers `_24` and is still correct for *importing*),
+  `read_bmp8_palette()` (reads the 256-entry BGRA palette straight off that real file),
+  `quantize_to_palette()` (chunked nearest-Euclidean-RGB-distance match, no dithering),
+  and `write_bmp8()` (writes a byte-correct 8-bit indexed BMP).
+
+  Verified byte-level (not just via Blender's own reimport, which could mask a subtle
+  bug): an untouched pixel round-trips to the exact palette index its original color
+  already had (zero drift), and two deliberately-painted marks at opposite ends of the
+  atlas (near the bottom and near the top) land at the correct rows with the right
+  colors - confirming Blender's `Image.pixels` buffer (bottom-up, index 0 = v=0) and a
+  positive-height BMP's on-disk row order (also bottom-up) already agree, so no row
+  reversal is needed when writing - reversing would have silently flipped every
+  exported atlas upside down, which this two-mark test would have caught immediately.
+
+  **Not yet done**: loading an actual exported `_8.BMP` in the real game to see a
+  repainted vehicle in the flesh - the verification above is thorough at the byte
+  level, but nobody has done the equivalent real-game check that falsified the old
+  `_24.BMP` approach, for this new writer specifically.
+
+- [x] **Import hangs indefinitely on models with degenerate faces — fixed 2026-07-05.**
+  `Psw232.RRF`'s "turretL" part has 8 of 104 faces with a repeated vertex index within
+  the same face (e.g. one quad using vertex 46 twice) - real content in a real shipped
+  file, not corruption introduced here. `bmesh.ops.recalc_face_normals()` in
+  `_recalculate_normals()` hangs indefinitely if any input face is degenerate this way -
+  confirmed reproducible every time on this exact part, while `turretR` (identical
+  face/vertex count, no degenerate faces) completed instantly. Confirmed
+  `mesh.from_pydata()`+`mesh.update()` keep all faces (including degenerate ones) with
+  their original count and order intact - only `mesh.validate()` (which the plugin never
+  called) would drop them, and doing that would break `face_texture_id`/
+  `face_uv_corners`/detach-face's face-index alignment with the original file. Fixed by
+  filtering degenerate faces out of just the `recalc_face_normals()` call's input
+  (`valid_faces = [f for f in bm.faces if len({v.index for v in f.verts}) == len(f.verts)]`),
+  leaving `mesh.polygons`'s count/order completely untouched. Verified: full import of
+  `Psw232.RRF` now completes in 0.136s (previously hung indefinitely).
+
 - [x] **"Detach face from shared texture cell" operator — done 2026-07-05.** Real models
   routinely reuse the exact same `.TLB` atlas rectangle across more than one face (the
   original artist's own space-saving choice — confirmed on a Panzer IV test model). Since
@@ -121,10 +215,39 @@ Running list of things flagged during work sessions, not yet done. Newest first.
   **A `.RRI` file is still the better answer when one exists** - it's the authoritative
   exact list, not a scored guess (see [TEXTURE_ID_RESOLUTION.md](docs/TEXTURE_ID_RESOLUTION.md)).
 
-- [ ] **Repaint export path untested against the real game/ObjEdit.** Only checked so far
-  via an automated pixel-comparison test inside Blender (painted regions match, untouched
-  regions match, correct format/size). Nobody has loaded an actual exported `_24.BMP` in
-  ObjEdit or the game yet to confirm it's accepted and displays correctly.
+- [x] **Repaint export path tested against the real game - and it fails. Tested
+  2026-07-05.** Previously only checked via an automated pixel-comparison test inside
+  Blender (painted regions match, untouched regions match, correct format/size) - never
+  against the real game or ObjEdit. Now tested against both, on a real, ground-truth-
+  confirmed install:
+
+  - **ObjEdit**: loading a model with our exported `_24.BMP` present made the entire
+    model invisible/black in OE's own 3D view (wireframe needed to see it at all), while
+    the Image Lib texture-library preview showed the file's content just fine. Isolated
+    with a clean before/after: removing our `_24.BMP` and reloading with only the
+    original `_8.BMP` present rendered correctly again - confirming the break was
+    specifically about our added file, not an unrelated OE quirk. This may be OE's own
+    hardware-rendering path not supporting a `_24.BMP` sibling at all, separate from the
+    question below.
+  - **The real game**: tested twice, independently, both negative. (1) `Pz4.TLB`
+    already ships with a real, pre-existing `Pz4_24.bmp` in active use - painted an
+    unmissable mark into it, loaded the exact vehicle/mission using it, no trace of the
+    mark. (2) A second vehicle (`PantherG`/`CustomA9.TLB`, confirmed via a genuine
+    pre-existing `.RRI` and a 79% id-resolution rate, not a guess) got the same result:
+    mark painted, exported as `CustomA9_24.bmp`, loaded the real mission the vehicle
+    spawns in at point-blank range - no trace of the mark, no crash, normal rendering
+    otherwise.
+
+  Matches a historical PEDG account that vanilla PE's renderer never read `_24.bmp` at
+  all - only a separate code-modded engine build ("PEx") does. This install is very
+  likely running without that code mod's texture-loading behavior active.
+  **Conclusion: Scenario A's export mechanism is sound but targets a file the real game
+  doesn't read here - it needs to write into `_8.BMP` instead (quantized against the
+  `.TLB`'s own palette) to actually reach the game.** See
+  [PAINT_AND_EXPORT_SCOPING.md](docs/PAINT_AND_EXPORT_SCOPING.md) for the full writeup,
+  including two auto-detect false starts hit while setting this test up (wrong-library
+  guesses, and a vehicle with an undetected per-unit skin override) worth remembering
+  for next time.
 
 - [ ] **Some texture placement issues still being tracked down.** Reported after the
   geometry/pivot fixes landed — "model is now accurate" but "still some odd texture

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 4, 0),
+    "version": (0, 6, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode face context menu > PE: Detach Face From Shared Texture Cell",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, and detach individual faces from a shared texture cell onto their own independent copy.",
@@ -363,6 +363,149 @@ def find_atlas_image(tlb_filepath):
     return None
 
 
+def find_source_bmp8(tlb_filepath):
+    """Specifically the paletted "_8.BMP" companion, never "_24.BMP" - unlike
+    find_atlas_image() (which prefers _24 for *importing*, since it's higher fidelity
+    when present), exporting needs the real _8.BMP as the source of truth for its
+    palette: confirmed against a real running install that the game reads _8.BMP, not
+    _24.BMP, regardless of which one is present (see PAINT_AND_EXPORT_SCOPING.md)."""
+    base = os.path.splitext(tlb_filepath)[0]
+    for suffix in ("_8.BMP", "_8.bmp"):
+        candidate = base + suffix
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def read_bmp8_palette(filepath):
+    """Reads the 256-entry BGRA palette from an existing 8-bit indexed BMP (the format
+    every real .TLB's own "_8.BMP" companion uses - confirmed: 40-byte
+    BITMAPINFOHEADER, palette starting at the standard offset 54, 4 bytes/entry).
+    Returns a list of 256 (R, G, B) tuples - the trailing byte (always 0/unused in real
+    files checked) is discarded."""
+    with open(filepath, "rb") as f:
+        header = f.read(54)
+        pal_data = f.read(256 * 4)
+    bpp = struct.unpack_from("<H", header, 28)[0]
+    if bpp != 8:
+        raise ValueError(f"{filepath} is {bpp}-bit, not 8-bit - can't read a palette from it")
+    palette = []
+    for i in range(256):
+        b, g, r, _ = pal_data[i * 4:i * 4 + 4]
+        palette.append((r, g, b))
+    return palette
+
+
+def quantize_to_palette(pixels_rgb, palette):
+    """pixels_rgb: (H, W, 3) uint8 array. palette: 256 (R, G, B) tuples. Returns an
+    (H, W) uint8 array of nearest-palette-color indices (plain Euclidean RGB distance,
+    no dithering). Repainted colors that don't already exist in the fixed 256-entry
+    palette land on their closest available match - an unavoidable consequence of the
+    paletted format the game actually reads, not a bug in this function. Chunked to
+    avoid building one huge (H*W, 256) distance matrix in memory at once."""
+    import numpy as np
+    pal_arr = np.array(palette, dtype=np.int32)  # (256, 3)
+    h, w, _ = pixels_rgb.shape
+    flat = pixels_rgb.reshape(-1, 3).astype(np.int32)  # (H*W, 3)
+    indices = np.empty(flat.shape[0], dtype=np.uint8)
+    chunk = 65536
+    for start in range(0, flat.shape[0], chunk):
+        block = flat[start:start + chunk]  # (N, 3)
+        dists = np.sum((block[:, None, :] - pal_arr[None, :, :]) ** 2, axis=2)  # (N, 256)
+        indices[start:start + chunk] = np.argmin(dists, axis=1).astype(np.uint8)
+    return indices.reshape(h, w)
+
+
+def write_bmp8(filepath, indices, palette):
+    """Writes a standard 8-bit indexed BMP - the format real "_8.BMP" atlas files
+    actually use (40-byte BITMAPINFOHEADER, 256-entry BGRA palette at offset 54, pixel
+    data starting at offset 1078). indices: (H, W) uint8 array. palette: 256 (R, G, B)
+    tuples.
+
+    Row order: a positive-height BMP stores rows bottom-up on disk (first row written
+    = bottom of the image). Blender's own Image.pixels buffer (what indices is derived
+    from via quantize_to_palette()) is *also* bottom-up - index 0 already corresponds
+    to v=0, the bottom row, matching Blender's own UV convention. That means indices'
+    row order already matches BMP's on-disk order directly with no reversal needed;
+    reversing it here would silently flip every exported atlas upside down."""
+    h, w = indices.shape
+    if w % 4 != 0:
+        raise ValueError(f"width {w} isn't a multiple of 4 - BMP row padding isn't handled here")
+    pal_bytes = bytearray(256 * 4)
+    for i, (r, g, b) in enumerate(palette):
+        pal_bytes[i * 4:i * 4 + 4] = bytes((b, g, r, 0))
+    data_offset = 54 + 256 * 4
+    pixel_data_size = w * h  # 1 byte/pixel, no row padding since width is a multiple of 4
+    file_size = data_offset + pixel_data_size
+
+    header = bytearray(54)
+    header[0:2] = b"BM"
+    struct.pack_into("<I", header, 2, file_size)
+    struct.pack_into("<I", header, 10, data_offset)
+    struct.pack_into("<I", header, 14, 40)  # BITMAPINFOHEADER size
+    struct.pack_into("<i", header, 18, w)
+    struct.pack_into("<i", header, 22, h)
+    struct.pack_into("<H", header, 26, 1)  # planes
+    struct.pack_into("<H", header, 28, 8)  # bpp
+    struct.pack_into("<I", header, 30, 0)  # BI_RGB, no compression
+    struct.pack_into("<I", header, 34, pixel_data_size)
+    struct.pack_into("<I", header, 46, 256)  # colors used
+    struct.pack_into("<I", header, 50, 256)  # colors important
+
+    with open(filepath, "wb") as f:
+        f.write(header)
+        f.write(pal_bytes)
+        for row in range(h):  # no reversal - see docstring
+            f.write(indices[row].tobytes())
+
+
+def write_bmp24(filepath, rgb):
+    """Writes a standard, uncompressed 24-bit BMP (no palette) - built by hand rather
+    than via Blender's own Image.save(), so every detail (header layout, byte order,
+    row padding, row direction) can be independently, explicitly verified instead of
+    trusted. This matters: an earlier version of the plugin's export operator used
+    Blender's generic Image.save(file_format="BMP") for this, and a real in-game test
+    of that output showed no effect and broke ObjEdit's own 3D view - but genuine
+    ObjEdit source (ImageLibUnit.pas) confirms _24.BMP *is* the preferred, expected
+    format when present, which means that earlier negative result may have been
+    testing a malformed file, not proof the format itself doesn't work. This writer
+    exists to test that possibility properly instead of assuming either way.
+
+    rgb: (H, W, 3) uint8 array, row 0 = bottom (Blender's own Image.pixels convention -
+    see write_bmp8()'s docstring for why that already matches a positive-height BMP's
+    on-disk bottom-up row order with no reversal needed). BMP rows must be padded to a
+    4-byte boundary; handled generically here even though every real 256px-wide atlas
+    in this format happens to need none (256*3=768, already a multiple of 4)."""
+    h, w, _ = rgb.shape
+    row_bytes_unpadded = w * 3
+    row_bytes = ((row_bytes_unpadded + 3) // 4) * 4
+    pad = row_bytes - row_bytes_unpadded
+    data_offset = 54
+    pixel_data_size = row_bytes * h
+    file_size = data_offset + pixel_data_size
+
+    header = bytearray(54)
+    header[0:2] = b"BM"
+    struct.pack_into("<I", header, 2, file_size)
+    struct.pack_into("<I", header, 10, data_offset)
+    struct.pack_into("<I", header, 14, 40)  # BITMAPINFOHEADER size
+    struct.pack_into("<i", header, 18, w)
+    struct.pack_into("<i", header, 22, h)
+    struct.pack_into("<H", header, 26, 1)  # planes
+    struct.pack_into("<H", header, 28, 24)  # bpp
+    struct.pack_into("<I", header, 30, 0)  # BI_RGB, no compression
+    struct.pack_into("<I", header, 34, pixel_data_size)
+
+    padding = b"\x00" * pad
+    with open(filepath, "wb") as f:
+        f.write(header)
+        for row in range(h):  # no reversal - see docstring
+            bgr_row = rgb[row][:, ::-1].tobytes()  # RGB -> BGR, per-pixel byte order
+            f.write(bgr_row)
+            if pad:
+                f.write(padding)
+
+
 def find_best_tlb(folder, unique_texture_ids, min_ratio=0.15, min_absolute=3):
     """Scan every .TLB directly inside `folder` (not recursive) and score each by how many
     of unique_texture_ids resolve against it via resolve_texture_id(). There's no reliable
@@ -411,6 +554,62 @@ def find_best_tlb(folder, unique_texture_ids, min_ratio=0.15, min_absolute=3):
     return best_path, best_parts, find_atlas_image(best_path), best_score
 
 
+def _classify_tlb_confidence(scored, total_resolved, total_ids):
+    """Classifies how much an auto-detect result should be trusted. The honest answer,
+    confirmed against real content rather than assumed: auto-detect is never treated as
+    "high" confidence here, no matter how clean its score looks. Two concrete findings
+    forced this, not a guess:
+
+    1. Psw232's auto-detect guess scored 96% with a real, clean gap behind it - and was
+       still the wrong library once checked against a real .RRI (the true answer needed
+       a completely different pair of libraries the score never flagged as relevant).
+    2. Scanning real playable vehicles (Pz4h, Pz4E, TigerL, PantherG, Psw232, SPW250MG,
+       M4A1, StuG3G) against both this project's install's live Texture folder and the
+       fuller original 98-library set showed *every single one* has another library
+       scoring within 1-2 unique ids of the top pick. This asset format's generic base
+       materials (flat colors, common metal/rubber tones) overlap too pervasively
+       across the whole library set for a score gap to mean anything reliable - it's
+       not a signal that happens to be missing sometimes, it structurally isn't there.
+
+    In short: a clean-looking auto-detect score is not evidence this format's real
+    content supports treating as trustworthy on its own. The only reliably correct
+    confirmation this project has found in practice is external - a real `.RRI` file
+    (handled separately in IMPORT_OT_rrf.execute(), stamped "rri", never routed through
+    this function) or actually checking in-game. Everything auto-detect touches is
+    "low" here, honestly labelled rather than implying a precision the data doesn't
+    support - the resolved percentage and nearest runner-up are still reported in
+    `reason` for context, since that's still useful information even though it isn't
+    enough to call something trustworthy.
+
+    scored: the full (score, path, tlb_parts, resolved_ids) list, sorted best-first,
+    same shape find_matching_tlbs() builds internally (already filtered to the noise
+    floor). total_resolved/total_ids: how many of the model's unique ids ended up
+    covered by the returned combination, out of how many exist in total.
+
+    Returns (confidence, reason): confidence is always "low" here. reason is a short,
+    honest, human-readable summary of what auto-detect actually found."""
+    if total_ids == 0 or total_resolved == 0:
+        return "low", "nothing resolved"
+
+    top_score = scored[0][0]
+    top_pct = 100 * top_score // total_ids
+    top_name = os.path.basename(scored[0][1])
+    if len(scored) > 1:
+        runner_up_name = os.path.basename(scored[1][1])
+        runner_pct = 100 * scored[1][0] // total_ids
+        return "low", (
+            f"auto-detect only ({top_pct}% resolved via '{top_name}', '{runner_up_name}' "
+            f"scores {runner_pct}% too) - a clean-looking score has still been wrong in "
+            f"this project's own real testing, so auto-detect alone is never treated as "
+            f"high-confidence here, only a real .RRI is"
+        )
+    return "low", (
+        f"auto-detect only ({top_pct}% resolved via '{top_name}', no other library scored "
+        f"above the noise floor) - no real .RRI to confirm this against, so auto-detect "
+        f"alone is never treated as high-confidence here"
+    )
+
+
 def find_matching_tlbs(folder, unique_texture_ids, min_ratio=0.15, min_absolute=3):
     """Like find_best_tlb(), but returns every library worth using instead of just the
     single best-scoring one - models that genuinely draw from several libraries at once
@@ -430,17 +629,24 @@ def find_matching_tlbs(folder, unique_texture_ids, min_ratio=0.15, min_absolute=
     added redundantly just because they happen to share the same generic materials.
     Stops early once every id is covered.
 
-    Returns a list of (path, tlb_parts, atlas_image_path, score) tuples, in the order
-    libraries were added (best overall match first) - an empty list if nothing scores
-    above the noise floor, same as find_best_tlb() returning (None, None, None, 0).
+    Returns (matches, confidence, reason): matches is a list of (path, tlb_parts,
+    atlas_image_path, score) tuples, in the order libraries were added (best overall
+    match first) - an empty list if nothing scores above the noise floor, same as
+    find_best_tlb() returning (None, None, None, 0). confidence is currently always
+    "low" (see _classify_tlb_confidence() - real testing found auto-detect is never
+    reliably distinguishable from a wrong guess by score alone), and reason is a short,
+    human-readable explanation of what auto-detect actually found. A genuinely wrong guess has repeatedly
+    looked plausible at a glance during this project's own testing (Psw232, and less
+    obviously Pz4E), so this exists to make that risk visible at import time instead of
+    only discoverable later in-game.
     """
     if not unique_texture_ids:
-        return []
+        return [], "low", "no unique texture ids to match against"
 
     try:
         entries = sorted(os.listdir(folder))
     except OSError:
-        return []
+        return [], "low", "could not list the texture folder"
 
     candidates = [os.path.join(folder, name) for name in entries if name.lower().endswith(".tlb")]
 
@@ -472,7 +678,10 @@ def find_matching_tlbs(folder, unique_texture_ids, min_ratio=0.15, min_absolute=
         result.append((path, tlb_parts, find_atlas_image(path), score))
         still_unresolved -= newly_covered
 
-    return result
+    total_resolved = len(unique_texture_ids) - len(still_unresolved)
+    confidence, reason = _classify_tlb_confidence(scored, total_resolved, len(unique_texture_ids))
+
+    return result, confidence, reason
 
 
 def read_rri(filepath):
@@ -499,12 +708,28 @@ def read_rri(filepath):
     return slots
 
 
-def find_rri_path(rrf_filepath):
+def find_rri_path(rrf_filepath, texture_folder=None):
+    """Checks next to the .RRF first (the documented convention), then - if given - the
+    shared Texture folder too. That second check matters: a real, genuine .RRI can
+    exist there instead (confirmed on PantherG.RRI, sitting directly in Texture\\ with
+    no matching .RRF alongside it) - checking only the .RRF's own directory silently
+    missed a real answer that was sitting in plain sight, so the caller fell through to
+    auto-detect and got a real answer wrong that a file already on disk would have
+    given for free."""
     base = os.path.splitext(rrf_filepath)[0]
     for suffix in (".RRI", ".rri", ".RRi", ".rRI"):
         candidate = base + suffix
         if os.path.isfile(candidate):
             return candidate
+
+    if texture_folder:
+        rrf_base = os.path.splitext(os.path.basename(rrf_filepath))[0]
+        texture_base = os.path.join(texture_folder, rrf_base)
+        for suffix in (".RRI", ".rri", ".RRi", ".rRI"):
+            candidate = texture_base + suffix
+            if os.path.isfile(candidate):
+                return candidate
+
     return None
 
 
@@ -547,6 +772,73 @@ def default_texture_folder(rrf_filepath):
         if os.path.isdir(candidate):
             return candidate
     return None
+
+
+PACK_FOLDERS = ("CustomA", "CustomB", "CustomC", "Desert_Obj", "Italy_Obj", "Normandy_Obj")
+
+
+def find_sibling_variant_rrfs(rrf_filepath):
+    """Finds same-named .RRF copies in the other known theatre "PackFolder" siblings
+    under the same install root (the CustomA/CustomB/CustomC/Desert_Obj/Italy_Obj/
+    Normandy_Obj layout every real asset checked in this project uses). These copies
+    can genuinely differ (see TODO.md) - this exists purely so a candidate library's
+    resolution rate can be cross-checked against every real copy of "the same"
+    vehicle, not just the one being imported right now. Returns a list of absolute
+    paths, excluding rrf_filepath itself - empty if none exist or the layout doesn't
+    match this pattern."""
+    rrf_dir = os.path.dirname(os.path.abspath(rrf_filepath))
+    install_root = os.path.dirname(rrf_dir)
+    basename = os.path.basename(rrf_filepath)
+
+    siblings = []
+    for pack_folder in PACK_FOLDERS:
+        candidate_dir = os.path.join(install_root, pack_folder)
+        if os.path.normcase(os.path.abspath(candidate_dir)) == os.path.normcase(rrf_dir):
+            continue
+        try:
+            names = os.listdir(candidate_dir)
+        except OSError:
+            continue
+        for name in names:
+            if name.lower() == basename.lower():
+                siblings.append(os.path.join(candidate_dir, name))
+                break
+    return siblings
+
+
+def cross_check_tlb_across_variants(rrf_filepath, tlb_filepath):
+    """Diagnostic only - doesn't change which library gets picked, just reports how
+    consistently a chosen candidate resolves each sibling theatre-variant copy of the
+    same-named .RRF (see find_sibling_variant_rrfs()). Confirmed useful by hand:
+    PantherG/CustomA9 resolved 79-100% across three real copies (trustworthy); TigerL
+    against its own best-guess library ranged 19%-95% across copies (a real,
+    immediately visible red flag that trial-and-error in-game testing had to find the
+    hard way instead).
+
+    Returns a list of (rrf_path, resolved_count, total_ids) tuples, one per sibling
+    found - empty if none exist or the candidate .TLB can't be read."""
+    siblings = find_sibling_variant_rrfs(rrf_filepath)
+    if not siblings:
+        return []
+
+    try:
+        tlb_parts = read_tlb(tlb_filepath)
+    except Exception:
+        return []
+    single = {0: tlb_parts}
+
+    results = []
+    for sibling_path in siblings:
+        try:
+            sibling_parts = read_rrf(sibling_path)
+        except Exception:
+            continue
+        ids = sorted({t for part in sibling_parts for t in part.face_texture_id if t is not None})
+        if not ids:
+            continue
+        resolved = sum(1 for tex_id in ids if resolve_texture_id(tex_id, single)[0] is not None)
+        results.append((sibling_path, resolved, len(ids)))
+    return results
 
 
 def _read_mesh_lod0(data, mesh_off):
@@ -758,7 +1050,7 @@ def detect_add_pivot_convention(parts):
     return {part.index: True for part in parts[1:] if part.vertices}
 
 
-def _build_material(root_name, image_path, tlb_filepath=None):
+def _build_material(root_name, image_path, tlb_filepath=None, tlb_confidence=None):
     image = bpy.data.images.load(image_path, check_existing=True)
     if tlb_filepath:
         # Lets face-level operators (e.g. "detach face from shared texture cell", see
@@ -766,6 +1058,15 @@ def _build_material(root_name, image_path, tlb_filepath=None):
         # without re-deriving it from the image filename (fragile - real files mix
         # .TLB/.tlb casing, and the _8.BMP/_24.BMP suffix-stripping isn't foolproof).
         image["pe_tlb_filepath"] = tlb_filepath
+    if tlb_confidence:
+        # How this .TLB was actually determined - "manual" (explicitly typed in),
+        # "rri" (a real .RRI sidecar, the authoritative source), "auto_high"/"auto_low"
+        # (auto-detect's own scoring - see _classify_tlb_confidence()). Inspectable
+        # later in Blender's own UI, not just something that scrolled by in the import
+        # report - auto-detect has repeatedly looked plausible and been wrong this
+        # project's own testing (Psw232, twice), so this is worth being able to check
+        # after the fact, not just at import time.
+        image["pe_tlb_confidence"] = tlb_confidence
     material = bpy.data.materials.new(root_name + "_mat")
     material.use_nodes = True
     bsdf = material.node_tree.nodes.get("Principled BSDF")
@@ -810,15 +1111,28 @@ def _recalculate_normals(mesh):
     faces (see the screen-space cross-product backface test in Rrdraw.c) - two-sided faces
     were never required to wind consistently since the game doesn't cull their backfaces
     either way. That leaves no single reliable "outward" convention to carry over from the
-    file, so recalculate from the actual mesh shape instead of trusting stored winding."""
+    file, so recalculate from the actual mesh shape instead of trusting stored winding.
+
+    Real shipped content includes occasional degenerate faces - a repeated vertex index
+    within the same face (confirmed on Psw232.RRF's "turretL" part: 8 of its 104 faces,
+    e.g. one quad using vertex 46 twice). bmesh.ops.recalc_face_normals() hangs
+    indefinitely if any of its input faces are degenerate this way - confirmed
+    reproducible (not a one-off): turretL hangs every time, while turretR, an
+    identically-sized part on the same model with no degenerate faces, completes
+    instantly. Excluding just the degenerate faces from this call (not from the mesh
+    itself) avoids the hang while leaving mesh.polygons' count and order completely
+    untouched - critical since face_texture_id/face_uv_corners and the detach-face
+    operator all index by original file face order, and mesh.validate() (which does drop
+    these) would break that alignment."""
     bm = bmesh.new()
     bm.from_mesh(mesh)
-    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    valid_faces = [f for f in bm.faces if len({v.index for v in f.verts}) == len(f.verts)]
+    bmesh.ops.recalc_face_normals(bm, faces=valid_faces)
     bm.to_mesh(mesh)
     bm.free()
 
 
-def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_filepath=None):
+def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_filepath=None, tlb_confidence=None):
     """slot_sources: {slot_index: (tlb_parts, atlas_image_path, tlb_filepath)} or None for
     geometry-only import. A model can use several libraries at once (one per slot) - each
     gets its own material, built once here and shared across every part/mesh, since the
@@ -826,7 +1140,10 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_f
 
     rrf_filepath (optional): stamped onto every created object as `pe_rrf_filepath`, so a
     face-level operator working on the resulting mesh can find its way back to the source
-    .RRF - same purpose as `_build_material()`'s `pe_tlb_filepath` on the Image."""
+    .RRF - same purpose as `_build_material()`'s `pe_tlb_filepath` on the Image.
+
+    tlb_confidence (optional): stamped onto every created Image as `pe_tlb_confidence` -
+    see _build_material()'s docstring."""
     slot_to_parts = {}
     slot_to_material = {}
     atlas_path_to_material = {}
@@ -841,7 +1158,7 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_f
             material = atlas_path_to_material.get(atlas_image_path)
             if material is None:
                 label = os.path.splitext(os.path.basename(atlas_image_path))[0]
-                material = _build_material(f"{root_name}_{label}", atlas_image_path, tlb_filepath)
+                material = _build_material(f"{root_name}_{label}", atlas_image_path, tlb_filepath, tlb_confidence)
                 atlas_path_to_material[atlas_image_path] = material
             slot_to_material[slot] = material
 
@@ -1030,6 +1347,8 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
 
         slot_sources = None
         detect_msg = ""
+        tlb_confidence = None
+        low_confidence_warning = None
 
         if self.tlb_filepath:
             try:
@@ -1039,10 +1358,11 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
                     self.report({"WARNING"}, "No matching _24.BMP/_8.BMP found next to the .TLB - importing geometry only")
                 else:
                     slot_sources = {0: (tlb_parts, atlas_image_path, self.tlb_filepath)}
+                    tlb_confidence = "manual"
             except Exception as e:
                 self.report({"WARNING"}, f"Could not read .TLB ({e}) - importing geometry only")
-        elif self.use_rri and find_rri_path(self.filepath):
-            rri_path = find_rri_path(self.filepath)
+        elif self.use_rri and find_rri_path(self.filepath, default_texture_folder(self.filepath)):
+            rri_path = find_rri_path(self.filepath, default_texture_folder(self.filepath))
             try:
                 rri_slots = read_rri(rri_path)
                 slot_sources = resolve_rri_libraries(rri_slots, self.filepath)
@@ -1051,6 +1371,8 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
                 if not slot_sources:
                     detect_msg += " (none resolved - importing geometry only)"
                     slot_sources = None
+                else:
+                    tlb_confidence = "rri"
             except Exception as e:
                 self.report({"WARNING"}, f"Could not read .RRI ({e}) - falling back")
 
@@ -1059,7 +1381,7 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
             auto_derived = not self.tlb_search_folder and search_folder is not None
             if search_folder:
                 unique_ids = sorted({t for part in parts for t in part.face_texture_id if t is not None})
-                matches = find_matching_tlbs(search_folder, unique_ids)
+                matches, confidence, confidence_reason = find_matching_tlbs(search_folder, unique_ids)
                 origin_note = " (auto-found sibling Texture folder)" if auto_derived else ""
                 if not matches:
                     detect_msg = f" - auto-detect{origin_note} found no good TLB match among {len(unique_ids)} unique texture ID(s)"
@@ -1077,18 +1399,49 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
                         self.report({"WARNING"}, f"No matching _24.BMP/_8.BMP for: {', '.join(skipped_no_atlas)} - those libraries skipped")
                     if built:
                         slot_sources = built
+                        # _classify_tlb_confidence() always returns "low" for the pure
+                        # auto-detect path (see its docstring - a clean-looking score
+                        # has still been wrong in this project's own real testing, so
+                        # auto-detect alone never earns "high" here; only a real .RRI
+                        # or an explicit manual tlb_filepath does). Cross-check the top
+                        # candidate against sibling theatre-variant copies of the same-
+                        # named .RRF for extra context - reported neutrally (just the
+                        # percentages), since a low-confidence score can come from a
+                        # close runner-up within *this* folder rather than genuine
+                        # cross-copy inconsistency, and the two aren't the same signal
+                        # (confirmed on Pz4E: the cross-check came back a consistent
+                        # 100%/100%, while the real reason for low confidence was five
+                        # other libraries scoring 98% right behind the top pick within
+                        # this one folder).
+                        tlb_confidence = "auto_low"
+                        top_path = matches[0][0]
+                        cross = cross_check_tlb_across_variants(self.filepath, top_path)
+                        cross_note = ""
+                        if cross:
+                            pct = [100 * r // t if t else 0 for _, r, t in cross]
+                            spread = max(pct) - min(pct)
+                            pct_text = ", ".join(f"{p}%" for p in pct)
+                            consistency = "inconsistent" if spread > 20 else "consistent"
+                            cross_note = f" (cross-checked against {len(cross)} sibling copy/copies: {pct_text} resolved - {consistency})"
+                        low_confidence_warning = (
+                            f"Auto-detect is NOT confident about '{os.path.basename(top_path)}' - "
+                            f"{confidence_reason}{cross_note}. Verify against a real .RRI or in-game "
+                            f"before trusting this texture (see TEXTURE_ID_RESOLUTION.md)."
+                        )
 
         root_name = os.path.splitext(os.path.basename(self.filepath))[0]
         collection = bpy.data.collections.new(root_name)
         context.scene.collection.children.link(collection)
 
         objects, resolved_count, unresolved_count = build_blender_objects(
-            parts, collection, root_name, slot_sources, rrf_filepath=self.filepath
+            parts, collection, root_name, slot_sources, rrf_filepath=self.filepath, tlb_confidence=tlb_confidence
         )
 
         msg = f"Imported {len(parts)} part(s) from {root_name}.rrf" + detect_msg
         if slot_sources is not None:
             msg += f" - {resolved_count} face(s) textured, {unresolved_count} unresolved"
+        if low_confidence_warning:
+            self.report({"WARNING"}, low_confidence_warning)
         if unresolved_count:
             msg += " (marked magenta / PE_UNRESOLVED_TEXTURE material - re-texture by hand)"
             self.report({"WARNING"}, msg)
@@ -1102,14 +1455,22 @@ def menu_func_import(self, context):
 
 
 class EXPORT_OT_rrf_atlas(bpy.types.Operator, ExportHelper):
-    """Save a texture atlas Image back out as a 24-bit .BMP the game can load.
+    """Save a texture atlas Image back out as an 8-bit indexed .BMP the game actually
+    reads.
 
     Covers "repaint existing regions" only (see docs/PAINT_AND_EXPORT_SCOPING.md in the
-    project repo): this does NOT touch the .RRF or .TLB at all. The game's own loader
-    prefers a "<name>_24.BMP" next to the .TLB over the paletted "_8.BMP" fallback, so
-    dropping a repainted 24-bit atlas in with the matching filename is sufficient - no
-    binary format writing needed for this case. Adding genuinely new texture regions
-    (new UV layout, new .TLB entries) is a separate, bigger job - not covered here.
+    project repo): this does NOT touch the .RRF or .TLB at all. An earlier version of
+    this operator wrote a 24-bit "<name>_24.BMP" on the assumption the game's loader
+    prefers it over the paletted "_8.BMP" fallback - confirmed wrong against a real
+    running install, twice independently (see PAINT_AND_EXPORT_SCOPING.md): the game
+    silently kept reading the original _8.BMP regardless, with no crash or error to
+    suggest anything was even attempted. This writes the format confirmed to actually
+    work instead - the repainted RGB pixels are quantized against the exact 256-color
+    palette the model's real _8.BMP already uses (read fresh from that file, not
+    reconstructed), so repainted colors land on their nearest available palette entry.
+    That's an unavoidable consequence of the paletted format the game reads, not a bug
+    here. Adding genuinely new texture regions (new UV layout, new .TLB entries) is a
+    separate, bigger job - not covered here.
     """
     bl_idname = "export_scene.pe_rrf_atlas"
     bl_label = "Export Panzer Elite Texture Atlas (.bmp)"
@@ -1124,9 +1485,9 @@ class EXPORT_OT_rrf_atlas(bpy.types.Operator, ExportHelper):
         name="Atlas Image",
         description="The texture atlas Image to save out - the one you were painting "
                     "on in Texture Paint. Every model sharing this atlas will see the "
-                    "change once this file replaces (or sits alongside) the original "
-                    "<name>_24.BMP, so double-check you're not overwriting an atlas "
-                    "other vehicles still rely on unless that's what you intend",
+                    "change once this file replaces the original <name>_8.BMP, so "
+                    "double-check you're not overwriting an atlas other vehicles still "
+                    "rely on unless that's what you intend",
     )
 
     def draw(self, context):
@@ -1141,7 +1502,12 @@ class EXPORT_OT_rrf_atlas(bpy.types.Operator, ExportHelper):
                         self.image_name = node.image.name
                         break
         if self.image_name:
-            self.filepath = os.path.splitext(self.image_name)[0] + ".bmp"
+            base = os.path.splitext(self.image_name)[0]
+            if base.endswith("_24"):
+                base = base[:-3]
+            elif base.endswith("_8"):
+                base = base[:-2]
+            self.filepath = base + "_8.bmp"
         return super().invoke(context, event)
 
     def execute(self, context):
@@ -1158,14 +1524,41 @@ class EXPORT_OT_rrf_atlas(bpy.types.Operator, ExportHelper):
                 f"saving anyway, but the game may not read a resized atlas correctly",
             )
 
-        image.filepath_raw = self.filepath
-        image.file_format = "BMP"
-        image.save()
+        tlb_filepath = image.get("pe_tlb_filepath")
+        source_bmp8 = find_source_bmp8(tlb_filepath) if tlb_filepath else None
+        if source_bmp8 is None:
+            self.report(
+                {"ERROR"},
+                "Could not find the original _8.BMP to read its palette from (no "
+                "pe_tlb_filepath recorded on this image, or no matching _8.BMP next to "
+                "its .TLB) - quantizing needs that palette, so this can't proceed",
+            )
+            return {"CANCELLED"}
+
+        try:
+            palette = read_bmp8_palette(source_bmp8)
+        except Exception as e:
+            self.report({"ERROR"}, f"Could not read palette from '{source_bmp8}': {e}")
+            return {"CANCELLED"}
+
+        import numpy as np
+        w, h = image.size
+        pixels = np.empty(w * h * 4, dtype=np.float32)
+        image.pixels.foreach_get(pixels)
+        pixels = pixels.reshape(h, w, 4)
+        rgb = np.clip(pixels[:, :, :3] * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        indices = quantize_to_palette(rgb, palette)
+
+        filepath = self.filepath
+        if not filepath.lower().endswith(".bmp"):
+            filepath += ".bmp"
+        write_bmp8(filepath, indices, palette)
 
         self.report(
             {"INFO"},
-            f"Saved '{image.name}' ({image.size[0]}x{image.size[1]}) to {self.filepath} - "
-            f"place it next to the .TLB as <name>_24.BMP for the game/ObjEdit to pick it up",
+            f"Saved '{image.name}' ({w}x{h}) as an 8-bit indexed BMP to {filepath}, "
+            f"quantized against {os.path.basename(source_bmp8)}'s palette - place it "
+            f"next to the .TLB as <name>_8.BMP for the game to pick it up",
         )
         return {"FINISHED"}
 
