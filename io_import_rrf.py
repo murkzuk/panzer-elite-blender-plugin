@@ -510,7 +510,7 @@ def plan_private_skin(bm, uv_layer, faces=None):
     return plans, warnings
 
 
-def apply_private_skin(rrf_data, part_index, bm, uv_layer, plans, library):
+def apply_private_skin(rrf_data, part_index, bm, uv_layer, plans, library, margin_px=2):
     """Write side of the "private skin" workflow: given plans from plan_private_skin()
     and a TLBLibrary to add entries to (pass a fresh new_tlb_library() for a genuinely
     new, dedicated atlas), allocates one .TLB entry per island (append_tlb_entry()),
@@ -520,6 +520,16 @@ def apply_private_skin(rrf_data, part_index, bm, uv_layer, plans, library):
     Blender-side UV to its new position in the packed atlas - the same forward
     atlas_x/atlas_y <-> u/v transform build_blender_objects() uses when reading a file
     back in, so a re-import of the result lines up with what's written here.
+
+    `margin_px` insets each island's actual content a couple pixels in from its entry's
+    own edges, rather than mapping content flush to the boundary - confirmed directly by
+    Alan/Brit44 on the public PEDG forum (2026-07-08, "Blender importer/exporter"
+    thread): adjacent right-triangle texture crops bleed across their shared hypotenuse
+    by about a pixel, so real PE texture work leaves a couple of pixels of buffer beyond
+    a region's nominal content rather than filling it edge-to-edge. This only changes
+    where content gets placed *within* an already-sized entry (see size_islands_to_tiles()
+    for how the entry's own size is chosen) - it doesn't grow the entry or touch the
+    packer, so it can't ever push something over the format's 256x256 per-entry cap.
 
     Mutates rrf_data and library in place (caller writes them out - see
     MESH_OT_pe_give_private_skin) and the mesh's UV layer directly. Returns the number
@@ -535,6 +545,13 @@ def apply_private_skin(rrf_data, part_index, bm, uv_layer, plans, library):
         bbox_w = max(max_u - min_u, 1e-9)
         bbox_h = max(max_v - min_v, 1e-9)
 
+        # Inset the usable content range by margin_px on each side (clamped so a very
+        # small entry - the format's own 16px minimum - still leaves at least a 1px-wide
+        # usable strip rather than inverting into a negative range).
+        safe_margin = min(margin_px, (sizeX - 1) // 2, (sizeY - 1) // 2)
+        usable_x0, usable_x1 = safe_margin, sizeX - 1 - safe_margin
+        usable_y0, usable_y1 = safe_margin, sizeY - 1 - safe_margin
+
         for face_index in plan["faces"]:
             patch_face_texture_id(rrf_data, part_index, 0, face_index, new_id)
             face = bm.faces[face_index]
@@ -545,9 +562,10 @@ def apply_private_skin(rrf_data, part_index, bm, uv_layer, plans, library):
                 # left to right same as u; y increases top to bottom, so v (which
                 # increases "up" in Blender's UV space) has to flip, matching the same
                 # convention _corner_xy()/patch_face_corners() and the importer's own
-                # atlas_y = (1-v)*ATLAS_HEIGHT already use.
-                local_x = (u - min_u) / bbox_w * (sizeX - 1)
-                local_y = (max_v - v) / bbox_h * (sizeY - 1)
+                # atlas_y = (1-v)*ATLAS_HEIGHT already use. Mapped into the inset
+                # [usable_x0, usable_x1] range, not the entry's full [0, sizeX-1] span.
+                local_x = usable_x0 + (u - min_u) / bbox_w * (usable_x1 - usable_x0)
+                local_y = usable_y0 + (max_v - v) / bbox_h * (usable_y1 - usable_y0)
                 lx = max(0, min(255, round(local_x)))
                 ly = max(0, min(255, round(local_y)))
                 xs.append(lx)
