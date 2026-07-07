@@ -168,13 +168,42 @@ import time as the `pe_pivot` custom property, not read from the object's own
 `obj.location`, so an accidental Object Mode move afterward can't silently corrupt what
 gets written).
 
+## Delete faces (Phase 2 geometry writer)
+
+Removes geometry from a part with a real write-back - cut away an unwanted detail, trim a
+model, or simplify a busy area. See [RRF_WRITER_SCOPING.md](RRF_WRITER_SCOPING.md) for the
+full technical writeup; adding brand new faces isn't supported yet (a separate, harder
+follow-on - a genuinely new face has no existing texture assignment to fall back on the
+way a surviving one does).
+
+1. Enter Edit Mode on the model, switch to face select, and select the face(s) you want
+   gone.
+2. Right-click for the mesh context menu and choose **PE: Delete Face(s) (write to
+   .RRF)** - operator id `mesh.pe_delete_faces`.
+
+```python
+bpy.ops.mesh.pe_delete_faces()
+```
+
+Deletes the selected face(s) and any vertex left with no remaining faces, then rewrites
+the part's whole mesh-data region and shifts every later part's file offsets accordingly
+- the first operator in this plugin that resizes anything rather than patching a
+fixed-size field in place. Every *surviving* face keeps its exact original texture
+assignment and UV crop; every surviving vertex keeps its exact original `attribVList`
+tag. Refuses (rather than guessing) if that would leave the part with zero faces, or if
+any surviving face's original texture data can't be read for some reason.
+
+**Same `.bak`-backed-up write as every other operator here.** Requires the mesh to still
+carry the `pe_face_index`/`pe_vertex_index` data stamped at import time - re-import with
+this plugin version if you're working from a model imported by an older one.
+
 ## Known limitations
 
 - Only the highest-detail LOD level is imported (appropriate for editing/painting; not a
   full multi-LOD round trip).
 - Export only covers repainting existing texture assignments (Scenario A) — no new
-  `.TLB` entries; geometry writing is limited to repositioning existing vertices (see
-  above) — adding/removing faces or parts isn't supported yet, see
+  `.TLB` entries; geometry writing covers repositioning existing vertices and
+  deleting faces (see above) — adding new faces or whole parts isn't supported yet, see
   [RRF_WRITER_SCOPING.md](RRF_WRITER_SCOPING.md) and
   [PAINT_AND_EXPORT_SCOPING.md](PAINT_AND_EXPORT_SCOPING.md).
 - Auto-detect (used when there's no `.RRI` and no hand-supplied `.TLB`) is **always**

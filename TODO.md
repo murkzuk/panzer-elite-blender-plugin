@@ -4,41 +4,58 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
-- [ ] **`.RRF` geometry writer Phase 2 (add/remove faces within a part) — re-scoped
-  2026-07-08 from real engine source, not built yet.** Phase 2 was previously blocked on
-  two total unknowns (`sortList`, `attribVList` - see the Phase 1 entry below). Both are
-  now substantially resolved by finding and reading the real source that defines them,
-  not just data analysis:
+- [x] **`.RRF` geometry writer Phase 2, "delete faces" case — re-scoped from real engine
+  source AND built/verified/real-tool-confirmed, all 2026-07-08.** Phase 2 was previously
+  blocked on two total unknowns (`sortList`, `attribVList` - see the Phase 1 entry below).
+  Both got resolved by finding and reading the real source that defines them, not just
+  data analysis:
 
   - **`sortList`**: confirmed in `rrobjpex\Rrdraw.c` (`rrDirectionToSortListNo()`,
     `rrCalcSortDirection()`) plus the `SORT_XSMALL`/`SORT_YSMALL`/`SORT_ZSMALL` constants
     (`Headers\SCENE.H`, also independently defined in `rrobjpex\Tank.c`) - the 8 blocks are
-    the 8 octants of 3D space, block index = a 3-bit code from the sign of the view
-    direction's local X/Y/Z components. The runtime only *selects* among 8 pre-baked
-    orderings (`rrDefineSortlist()`) - it never computes them, confirming a writer really
-    does have to bake all 8 per part. Empirically corroborated too: every real block
-    checked is a clean permutation of `0..faceCount-1` (no bit-15-flagged skip entries in
-    any real file, even though the render loop has a check for one), and sorting face
-    centroids by depth along each block's corresponding octant-diagonal direction
-    correlates at Spearman's ρ = 0.85-0.96 - strong, but not exact, meaning the precise
-    per-face depth metric the original tool used isn't 100% nailed down yet.
+    the 8 octants of 3D space. Normalizing the empirical correlation results for the
+    ascending/descending sign ambiguity revealed a genuine **closed-form recipe**, the
+    same across every real part tested: block index bit 0/1/2 directly encodes that axis's
+    sort-direction sign (1=positive, 0=negative), and each block sorts its faces by
+    ascending centroid depth along that direction - implemented as `compute_sort_list()`.
+    Empirically strong (Spearman's ρ 0.85-0.985 on every real part checked) but not proven
+    byte-exact (per-block exact match ~7-19%, vs. ~1% random-chance baseline).
   - **`attribVList`**: confirmed in `Rrdwire.c` (the same face-subdivision function
     RRF_FORMAT.md's own corner-encoding facts came from) - it's read per-corner-vertex and
     passed through `rrCalcAttribList(sx,sy,va1,va2,va3,va4,newAttribVList)`, interpolated
-    across a new subdivision grid exactly like vertex position/normal are in the same
-    function. A genuine interpolatable per-vertex value tied to a face-splitting/
-    tessellation feature, not a flag - and since many real parts have all-zero
-    `attribVList` data, Phase 2 can safely preserve existing values and zero-fill any
-    genuinely new vertex without needing to know what the value actually represents.
+    across a new subdivision grid exactly like vertex position/normal in the same function.
+    A genuine interpolatable per-vertex value tied to a face-splitting/tessellation
+    feature, not a flag - Phase 2 preserves existing values and zero-fills new ones without
+    needing to know what the value actually represents.
+  - **Real memory layout, also confirmed via offset-gap analysis across real files**: a
+    part's LOD0 mesh region is `faceList → faceNormList → vertexList → vertexNormList →
+    sortList → attribVList`, contiguous, zero padding, `faceNormList`/`vertexNormList`
+    entries 12 bytes each (same 3×int32 convention as vertices) - never measured before.
+    All 8 LOD slots in every real part are exact duplicates of LOD0's fields.
 
-  Full write-up with the real source quotes is in
-  [docs/RRF_WRITER_SCOPING.md](docs/RRF_WRITER_SCOPING.md) ("What's genuinely unknown or
-  risky" and the re-scoped "Phase 2" section). **Not built yet** - what's left is real
-  implementation (a `sortList` builder using the confirmed recipe, the offset-rewrite pass
-  for every part after a resized one, `attribVList` carry-forward/zero-fill) plus a real
-  in-game/ObjEdit visual test of an actual add/remove-faces edit specifically, since the
-  approximate (not proven-exact) `sortList` recipe means this phase needs its own visual
-  gate, not just byte-level/re-import verification the way Phase 1 got away with.
+  **Built and shipped**: `compute_sort_list()`, `_region_size()`, `_pack_face_record()`,
+  `rebuild_part_mesh_region()` in `io_import_rrf.py` - the general resize/rebuild/
+  offset-shift machinery, wired into `MESH_OT_pe_delete_faces` ("PE: Delete Face(s) (write
+  to .RRF)", Edit Mode mesh context menu, v0.10.0). Two new per-element tracking
+  attributes stamped at import (`pe_face_index`/`pe_vertex_index`) let a surviving face/
+  vertex's real original texture/UV/attribVList data be found again after Blender's own
+  indices change from a delete. Verified on real files (`PantherG.RRF`): a simple 1-face
+  delete (byte-exact 52-byte file shrink, every surviving face's texture id unchanged, the
+  part before it untouched, the part after it correctly shifted), a harder 4-face/
+  6-orphaned-vertex delete on the 122-face hull (all 8 new `sortList` blocks confirmed
+  valid permutations, 0 unresolved faces on re-import), and finally a real visual
+  confirmation in the user's own ObjEdit build (deleted 56 of 84 faces on the gun barrel -
+  loaded with no crash, barrel rendered correctly truncated, rest of the model normal).
+
+  **"Add new faces" is a separate, unbuilt follow-on** - not a format blocker, but a real
+  design gap: a genuinely new face has no existing texture assignment to read, and this
+  plugin's materials each represent a whole `.TLB` library, not one specific atlas
+  rectangle, so material+UV alone can't tell you which crop a new face should show. Needs
+  real UV-island-to-atlas allocation, most likely reusing `plan_private_skin()`/
+  `apply_private_skin()`'s own machinery rather than inventing something new.
+
+  Full write-up (including the closed-form `sortList` derivation and the build report) is
+  in [docs/RRF_WRITER_SCOPING.md](docs/RRF_WRITER_SCOPING.md).
 
 - [x] **Full `.RRF` geometry writer — scoped 2026-07-08. Phase 1 (reposition existing
   vertices, same topology) BUILT, verified, and real-tool-confirmed the same day.** The last major piece needed

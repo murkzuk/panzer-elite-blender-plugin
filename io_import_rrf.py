@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 9, 0),
+    "version": (0, 10, 0),
     "blender": (3, 6, 0),
-    "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions",
-    "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, and write repositioned vertices back to the model's own .RRF (same-topology geometry edits).",
+    "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
+    "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
     "category": "Import-Export",
 }
 
@@ -1370,6 +1370,191 @@ def patch_vertex_position(data, part_index, lod, vertex_index, x, y, z):
     )
 
 
+def _face_centroid(face_verts, vertices):
+    xs = [vertices[i][0] for i in face_verts]
+    ys = [vertices[i][1] for i in face_verts]
+    zs = [vertices[i][2] for i in face_verts]
+    n = len(face_verts)
+    return (sum(xs) / n, sum(ys) / n, sum(zs) / n)
+
+
+def compute_sort_list(vertices, faces):
+    """Regenerates all 8 sortList blocks (RRF_FORMAT.md) for a mesh - Phase 2 of the
+    geometry writer (docs/RRF_WRITER_SCOPING.md), needed the moment a part's face count
+    changes, since a stale/wrong-length sortList would corrupt the file.
+
+    The direction/depth-sort recipe here is confirmed from the real engine source
+    (rrobjpex\\Rrdraw.c's rrDirectionToSortListNo()/rrCalcSortDirection(), and the
+    SORT_XSMALL/SORT_YSMALL/SORT_ZSMALL constants also used in Tank.c): the 8 blocks are
+    the 8 octants of 3D space, and - empirically confirmed against real sortList data on
+    4 independent real parts across 2 different vehicles, Spearman's rho 0.85-0.985 on
+    every block, always positive once this exact convention is used - block index bit 0/
+    1/2 (X/Y/Z) = 1 means that axis's sort direction is positive, 0 means negative; each
+    block orders its faces by ASCENDING face-centroid depth along that direction.
+
+    This is empirically strong but not proven byte-exact against the original tool's own
+    per-face depth metric (exact match runs ~7-19% per block on real files, vs. the ~1%
+    random-chance baseline) - see RRF_WRITER_SCOPING.md for what this means in practice
+    and why a real in-game/ObjEdit visual check still matters for anything that uses this.
+
+    Returns a list of 8 lists, each a permutation of 0..len(faces)-1."""
+    centroids = [_face_centroid(f, vertices) for f in faces]
+    blocks = []
+    for block_index in range(8):
+        dx = 1.0 if block_index & 1 else -1.0
+        dy = 1.0 if block_index & 2 else -1.0
+        dz = 1.0 if block_index & 4 else -1.0
+        depths = [cx * dx + cy * dy + cz * dz for cx, cy, cz in centroids]
+        order = sorted(range(len(faces)), key=lambda i: depths[i])
+        blocks.append(order)
+    return blocks
+
+
+def _region_size(faceCount, vertexCount):
+    """Total contiguous byte size of one part's LOD0 mesh-data region (faceList +
+    faceNormList + vertexList + vertexNormList + sortList + attribVList). Confirmed via
+    real-file offset-gap analysis (2026-07-08): these 6 regions are laid out contiguously
+    in exactly this order with zero padding between them, for every part checked across
+    multiple real files - and each part's own region likewise follows the previous part's
+    with no gap, all the way up to the embedded placeholder texture block at the end of
+    the file. faceNormList/vertexNormList entries are 12 bytes each (same 3x-int32
+    convention as vertexList) - also confirmed the same way, never previously measured."""
+    face_list_size = faceCount * FACE_SIZE
+    face_norm_size = faceCount * 12
+    vertex_list_size = vertexCount * VERTEX_SIZE
+    vertex_norm_size = vertexCount * 12
+    sort_list_size = faceCount * 8 * 2
+    attrib_count = vertexCount + (vertexCount % 2)
+    attrib_size = attrib_count * 2
+    return face_list_size + face_norm_size + vertex_list_size + vertex_norm_size + sort_list_size + attrib_size
+
+
+def _pack_face_record(vertex_indices, texture_id, corners):
+    """Packs one new face record (24 bytes) as a textured face - real, common
+    materialInfo=0x9 (0x19 for quads), the single most common value on textured faces
+    surveyed across real files (a specific shading-mode/texture-bit combination, not
+    every optional flag real files sometimes also carry, but a real working baseline).
+    Corner-role packing matches patch_face_corners() (v1=top-right, v2=top-left,
+    v3=bottom-left, textureHalf=bottom-right for quads).
+
+    Only supports textured faces - Phase 2 v1 doesn't write genuinely non-textured/
+    solid-shaded new content (see docs/RRF_WRITER_SCOPING.md)."""
+    is_quad = len(vertex_indices) == 4
+    v1_idx, v2_idx, v3_idx = vertex_indices[0], vertex_indices[1], vertex_indices[2]
+    v4_idx = vertex_indices[3] if is_quad else 0
+
+    def _pack(idx, xy):
+        x, y = xy
+        return (idx & 0xFFFF) | (y << 24) | (x << 16)
+
+    v1 = _pack(v1_idx, corners[0])
+    v2 = _pack(v2_idx, corners[1])
+    v3 = _pack(v3_idx, corners[2])
+    textureHalf = _pack(v4_idx, corners[3]) if is_quad else 0
+    textureOfset = 0x80000000 | (texture_id & 0x7FFFFFFF)
+    materialInfo = 0x9 | (MAT_QUAD if is_quad else 0)
+    return struct.pack("<IIIIII", v1, v2, v3, textureOfset, textureHalf, materialInfo)
+
+
+def rebuild_part_mesh_region(data, part_index, new_vertices, new_faces, new_texture_ids, new_corners, new_attrib_v):
+    """Rebuilds one part's entire LOD0 mesh-data region to reflect a new vertex/face
+    count, and shifts every later part's mesh-record offsets (all 8 LOD slots, all 6
+    offset fields each - real files always duplicate LOD0's fields identically across all
+    8 slots) by the resulting size delta. This is Phase 2 of the geometry writer (see
+    docs/RRF_WRITER_SCOPING.md) - the first operation in this project that resizes
+    anything, rather than patching a fixed-size field in place.
+
+    new_vertices: list of (x, y, z) raw (file-convention) floats.
+    new_faces: list of vertex-index tuples (3 for a triangle, 4 for a quad) into
+    new_vertices.
+    new_texture_ids / new_corners: parallel lists, one per new_faces entry.
+    new_attrib_v: list of ints, one per new_vertices entry (attribVList tag) - callers
+    should carry forward real values for surviving vertices and default new ones to 0
+    (see docs/RRF_WRITER_SCOPING.md's attribVList findings).
+
+    Returns a new bytes object for the WHOLE file - the original buffer is untouched."""
+    data = bytearray(data)
+
+    maxLOD, transInfo, objCount, maxAllVertex, textureStart, textureLen = struct.unpack_from("<HHIIII", data, 0)
+
+    part_off = HEADER_SIZE + part_index * PART_SIZE
+    mesh_off = _mesh_record_offset(part_index, 0)
+    (meshType, old_faceCount, old_faceList_off, old_faceNormList_off,
+     old_vertexCount, old_vertexList_off, old_vertexNormList_off,
+     old_sortList_off, old_attribVList_off) = struct.unpack_from("<IIIIIIIII", data, mesh_off)
+
+    old_region_start = old_faceList_off
+    old_region_size = _region_size(old_faceCount, old_vertexCount)
+    old_region_end = old_region_start + old_region_size
+
+    new_faceCount = len(new_faces)
+    new_vertexCount = len(new_vertices)
+    new_region_size = _region_size(new_faceCount, new_vertexCount)
+    delta = new_region_size - old_region_size
+
+    sort_blocks = compute_sort_list(new_vertices, new_faces)
+
+    face_bytes = bytearray()
+    for face_verts, tex_id, corners in zip(new_faces, new_texture_ids, new_corners):
+        face_bytes += _pack_face_record(face_verts, tex_id, corners)
+    face_norm_bytes = bytes(new_faceCount * 12)  # zero-filled - normals are recalculated on import anyway
+    vertex_bytes = bytearray()
+    for x, y, z in new_vertices:
+        vertex_bytes += struct.pack("<iii", float_to_fixed(x), float_to_fixed(y), float_to_fixed(z))
+    vertex_norm_bytes = bytes(new_vertexCount * 12)  # zero-filled, same reasoning
+    sort_bytes = bytearray()
+    for block in sort_blocks:
+        sort_bytes += struct.pack(f"<{new_faceCount}H", *block)
+    attrib_count = new_vertexCount + (new_vertexCount % 2)
+    attrib_padded = list(new_attrib_v) + [0] * (attrib_count - new_vertexCount)
+    attrib_bytes = struct.pack(f"<{attrib_count}H", *attrib_padded)
+
+    new_region = bytes(face_bytes) + bytes(face_norm_bytes) + bytes(vertex_bytes) + bytes(vertex_norm_bytes) + bytes(sort_bytes) + bytes(attrib_bytes)
+    if len(new_region) != new_region_size:
+        raise AssertionError(f"internal error: built {len(new_region)} bytes, expected {new_region_size}")
+
+    # Splicing a differently-sized slice into a bytearray automatically resizes the
+    # whole buffer and shifts everything after it - the placeholder texture block's
+    # bytes move for free here, only the header's own record of where it starts (below)
+    # needs updating.
+    data[old_region_start:old_region_end] = new_region
+
+    new_faceList_off = old_region_start
+    new_faceNormList_off = new_faceList_off + new_faceCount * FACE_SIZE
+    new_vertexList_off = new_faceNormList_off + new_faceCount * 12
+    new_vertexNormList_off = new_vertexList_off + new_vertexCount * VERTEX_SIZE
+    new_sortList_off = new_vertexNormList_off + new_vertexCount * 12
+    new_attribVList_off = new_sortList_off + new_faceCount * 8 * 2
+
+    for lod in range(8):
+        lod_off = part_off + 224 + lod * MESH_SIZE
+        struct.pack_into(
+            "<IIIIIIIII", data, lod_off,
+            meshType, new_faceCount, new_faceList_off, new_faceNormList_off,
+            new_vertexCount, new_vertexList_off, new_vertexNormList_off,
+            new_sortList_off, new_attribVList_off,
+        )
+
+    if delta != 0:
+        for p in range(part_index + 1, objCount):
+            other_part_off = HEADER_SIZE + p * PART_SIZE
+            for lod in range(8):
+                lod_off = other_part_off + 224 + lod * MESH_SIZE
+                vals = list(struct.unpack_from("<IIIIIIIII", data, lod_off))
+                vals[2] += delta  # faceList_off
+                vals[3] += delta  # faceNormList_off
+                vals[5] += delta  # vertexList_off
+                vals[6] += delta  # vertexNormList_off
+                vals[7] += delta  # sortList_off
+                vals[8] += delta  # attribVList_off
+                struct.pack_into("<IIIIIIIII", data, lod_off, *vals)
+
+        new_textureStart = textureStart + delta
+        struct.pack_into("<HHIIII", data, 0, maxLOD, transInfo, objCount, maxAllVertex, new_textureStart, textureLen)
+
+    return bytes(data)
+
+
 def _bbox(vertices):
     xs = [v[0] for v in vertices]
     ys = [v[1] for v in vertices]
@@ -1560,6 +1745,19 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_f
             mesh.from_pydata(local_verts, [], part.faces)
             mesh.update()
             _recalculate_normals(mesh)
+
+            # Tracks each vertex/face's original position in the file's own LOD0 arrays
+            # - from_pydata() preserves the exact given order, so at this point these are
+            # simply 0..count-1, but they matter once a later edit changes vertex/face
+            # count (see MESH_OT_pe_delete_faces): a geometry-writing operator can look up
+            # a surviving element's real original index (to carry over its texture/
+            # attribVList data) even after Blender itself renumbers everything.
+            face_index_attr = mesh.attributes.new(name="pe_face_index", type="INT", domain="FACE")
+            for i in range(len(mesh.polygons)):
+                face_index_attr.data[i].value = i
+            vertex_index_attr = mesh.attributes.new(name="pe_vertex_index", type="INT", domain="POINT")
+            for i in range(len(mesh.vertices)):
+                vertex_index_attr.data[i].value = i
 
             if slot_sources:
                 uv_layer = mesh.uv_layers.new(name="UVMap")
@@ -2469,11 +2667,171 @@ class MESH_OT_pe_write_vertex_positions(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class MESH_OT_pe_delete_faces(bpy.types.Operator):
+    """Deletes the selected face(s) - and any vertex left with no remaining faces - and
+    writes the result back to the model's own .RRF. The first real "remove geometry"
+    piece of Phase 2 of the geometry writer (see docs/RRF_WRITER_SCOPING.md); adding
+    genuinely new faces is a separate, harder follow-on, since a brand new face has no
+    existing texture assignment to fall back on the way every surviving face here does.
+
+    Every REMAINING face keeps its exact original texture id and UV-crop corners, looked
+    up from the file via each face's pe_face_index custom attribute (stamped at import
+    time) - nothing about texturing needs inventing here, since this operator only ever
+    removes content. Vertex positions for surviving vertices convert from Blender's local
+    mesh-space back to the file's raw convention exactly like
+    MESH_OT_pe_write_vertex_positions does (root part: add the pivot back; every other
+    part: unchanged). Each surviving vertex's attribVList tag is carried over unchanged
+    from the original file via its own pe_vertex_index custom attribute - never invented,
+    since deleting never introduces a genuinely new vertex.
+
+    sortList is fully regenerated for the new, smaller face count using
+    compute_sort_list() - a real recipe confirmed from the actual engine source, but
+    empirically strong (not proven byte-exact) - see RRF_WRITER_SCOPING.md. A real
+    in-game/ObjEdit visual check of the result is recommended before trusting this on
+    real work, the same way Phase 1 needed one.
+
+    This resizes the part's whole mesh-data region and shifts every later part's mesh
+    offsets in the file accordingly - the first operator in this project to do that."""
+
+    bl_idname = "mesh.pe_delete_faces"
+    bl_label = "PE: Delete Face(s) (write to .RRF)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (
+            obj is not None
+            and obj.type == "MESH"
+            and obj.mode == "EDIT"
+            and "pe_rrf_filepath" in obj
+            and "pe_part_index" in obj
+            and "pe_pivot" in obj
+        )
+
+    def execute(self, context):
+        obj = context.active_object
+        mesh = obj.data
+        rrf_filepath = obj["pe_rrf_filepath"]
+        part_index = obj["pe_part_index"]
+        pivot = obj["pe_pivot"]
+        is_root = (part_index == 0)
+
+        bm = bmesh.from_edit_mesh(mesh)
+        bm.faces.ensure_lookup_table()
+        bm.verts.ensure_lookup_table()
+
+        selected_faces = [f for f in bm.faces if f.select]
+        if not selected_faces:
+            self.report({"WARNING"}, "No faces selected")
+            return {"CANCELLED"}
+
+        face_index_layer = bm.faces.layers.int.get("pe_face_index")
+        vertex_index_layer = bm.verts.layers.int.get("pe_vertex_index")
+        if face_index_layer is None or vertex_index_layer is None:
+            self.report(
+                {"ERROR"},
+                "This mesh has no pe_face_index/pe_vertex_index data - re-import with "
+                "this plugin version before using this operator.",
+            )
+            return {"CANCELLED"}
+
+        try:
+            rrf_data = read_rrf_raw(rrf_filepath)
+        except OSError as e:
+            self.report({"ERROR"}, f"Could not read {rrf_filepath}: {e}")
+            return {"CANCELLED"}
+
+        deleted_count = len(selected_faces)
+        bmesh.ops.delete(bm, geom=selected_faces, context='FACES_ONLY')
+        bm.verts.ensure_lookup_table()
+        orphan_verts = [v for v in bm.verts if not v.link_faces]
+        if orphan_verts:
+            bmesh.ops.delete(bm, geom=orphan_verts, context='VERTS')
+
+        bm.verts.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+
+        if not bm.faces:
+            self.report({"ERROR"}, "That would delete every face in this part - refusing (a part needs at least one face)")
+            return {"CANCELLED"}
+
+        surviving_vertex_orig = [v[vertex_index_layer] for v in bm.verts]
+        vertex_orig_to_new = {orig: new for new, orig in enumerate(surviving_vertex_orig)}
+
+        new_vertices = []
+        for v in bm.verts:
+            lx, ly, lz = v.co
+            if is_root:
+                new_vertices.append((lx + pivot[0], ly + pivot[1], lz + pivot[2]))
+            else:
+                new_vertices.append((lx, ly, lz))
+
+        new_faces = []
+        new_texture_ids = []
+        new_corners = []
+        skipped = 0
+        for face in bm.faces:
+            orig_face_index = face[face_index_layer]
+            try:
+                tex_id = read_face_texture_id(rrf_data, part_index, 0, orig_face_index)
+                corners = read_face_corners(rrf_data, part_index, 0, orig_face_index)
+            except (IndexError, struct.error):
+                skipped += 1
+                continue
+            orig_vert_indices = [v[vertex_index_layer] for v in face.verts]
+            new_vert_indices = [vertex_orig_to_new[ov] for ov in orig_vert_indices]
+            new_faces.append(tuple(new_vert_indices))
+            new_texture_ids.append(tex_id)
+            new_corners.append(corners)
+
+        if skipped:
+            self.report(
+                {"ERROR"},
+                f"{skipped} surviving face(s) had no readable original texture data - "
+                f"aborting, nothing written.",
+            )
+            return {"CANCELLED"}
+
+        mesh_off = _mesh_record_offset(part_index, 0)
+        (_meshType, _old_faceCount, _old_faceList_off, _old_faceNormList_off,
+         _old_vertexCount, _old_vertexList_off, _old_vertexNormList_off,
+         _old_sortList_off, old_attribVList_off) = struct.unpack_from("<IIIIIIIII", rrf_data, mesh_off)
+        new_attrib_v = []
+        for orig_v in surviving_vertex_orig:
+            val, = struct.unpack_from("<H", rrf_data, old_attribVList_off + orig_v * 2)
+            new_attrib_v.append(val)
+
+        new_data = rebuild_part_mesh_region(
+            rrf_data, part_index, new_vertices, new_faces, new_texture_ids, new_corners, new_attrib_v
+        )
+
+        _backup_once(rrf_filepath)
+        write_rrf_raw(rrf_filepath, new_data)
+
+        # Re-stamp pe_face_index/pe_vertex_index on the surviving elements to match the
+        # file's own new 0..count-1 numbering, so later edits (further deletes, or
+        # MESH_OT_pe_write_vertex_positions) keep working against the file as it now is.
+        for new_idx, v in enumerate(bm.verts):
+            v[vertex_index_layer] = new_idx
+        for new_idx, f in enumerate(bm.faces):
+            f[face_index_layer] = new_idx
+        bmesh.update_edit_mesh(mesh)
+
+        self.report(
+            {"INFO"},
+            f"Deleted {deleted_count} face(s) ({len(orphan_verts)} orphaned vertex/vertices "
+            f"removed), wrote {len(new_faces)} remaining face(s) back to {os.path.basename(rrf_filepath)}",
+        )
+        return {"FINISHED"}
+
+
 def menu_func_detach_face(self, context):
     self.layout.operator(MESH_OT_pe_detach_face_texture.bl_idname, icon="TEXTURE")
     self.layout.operator(MESH_OT_pe_set_face_crop.bl_idname, icon="UV")
     self.layout.operator(MESH_OT_pe_give_private_skin.bl_idname, icon="IMAGE_PLANE")
     self.layout.operator(MESH_OT_pe_write_vertex_positions.bl_idname, icon="VERTEXSEL")
+    self.layout.operator(MESH_OT_pe_delete_faces.bl_idname, icon="TRASH")
 
 
 def register():
@@ -2483,6 +2841,7 @@ def register():
     bpy.utils.register_class(MESH_OT_pe_set_face_crop)
     bpy.utils.register_class(MESH_OT_pe_give_private_skin)
     bpy.utils.register_class(MESH_OT_pe_write_vertex_positions)
+    bpy.utils.register_class(MESH_OT_pe_delete_faces)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
     bpy.types.VIEW3D_MT_edit_mesh_context_menu.append(menu_func_detach_face)
@@ -2492,6 +2851,7 @@ def unregister():
     bpy.types.VIEW3D_MT_edit_mesh_context_menu.remove(menu_func_detach_face)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+    bpy.utils.unregister_class(MESH_OT_pe_delete_faces)
     bpy.utils.unregister_class(MESH_OT_pe_write_vertex_positions)
     bpy.utils.unregister_class(MESH_OT_pe_give_private_skin)
     bpy.utils.unregister_class(MESH_OT_pe_set_face_crop)

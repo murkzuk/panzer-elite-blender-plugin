@@ -132,12 +132,18 @@ in-memory object base address the original loader added them to).
   the sign of the view direction's local X/Y/Z components
   (`listNo = (Xneg?1:0)|(Yneg?2:0)|(Zneg?4:0)`). The renderer only *selects* among the 8
   pre-baked blocks for the current camera direction at runtime (`rrDefineSortlist()`); it
-  never computes an ordering itself. Real per-block content correlates strongly
-  (Spearman's ρ = 0.85–0.96, every part checked) with sorting that block's own faces by
-  centroid depth along the corresponding octant's `(±1,±1,±1)`-diagonal direction — strong
-  evidence for the algorithm's shape, though the exact per-face depth metric isn't
-  confirmed to be plain centroid distance (residual ~5–15% positional deviation). See
-  [RRF_WRITER_SCOPING.md](RRF_WRITER_SCOPING.md) for the full writeup and what this means
+  never computes an ordering itself. **A working, buildable recipe is confirmed**: block
+  index bit 0/1/2 encodes that axis's sort-direction sign (1=positive, 0=negative), and
+  each block sorts its own faces by *ascending* face-centroid depth along that direction —
+  `compute_sort_list()` in `io_import_rrf.py` implements this, and it's real/built-and-
+  used, not just theoretical (see `MESH_OT_pe_delete_faces`). Real per-block content
+  correlates strongly with this recipe (Spearman's ρ = 0.85–0.985, consistent sign, every
+  part checked across 2 different vehicles) but not perfectly (exact match ~7-19% per
+  block, vs. ~1% random-chance baseline — real signal, not a proven-exact reproduction of
+  whatever the original tool's precise per-face depth metric was). A real face-deletion
+  test using this recipe loaded and rendered correctly in the user's own ObjEdit build
+  with no visible artifacts - encouraging, though only tested with faces being *removed*,
+  not newly added. See [RRF_WRITER_SCOPING.md](RRF_WRITER_SCOPING.md) for the full writeup
   for a writer that needs to regenerate this field.
 - `attribVList`: `vertexCount` (rounded up to even) `uint16` entries, indexed by vertex —
   a per-vertex attribute tag used when the original editor splits faces. Confirmed

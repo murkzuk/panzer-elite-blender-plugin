@@ -7,12 +7,14 @@ verified, AND real-tool-confirmed the same day** - `read_vertex_position()`/
 menu, v0.9.0). The one open item from the build report below (a real visual check in
 ObjEdit) is now done - see "Real-tool confirmation" at the end of the Phase 1 section.
 
-**Phase 2 re-scoped the same day, from real engine source, not built yet.** Both of the
-format regions that were blocking it (`sortList`, `attribVList`) are now substantially
-understood - see "What's genuinely unknown or risky" below for the real `Rrdraw.c`/
-`Rrdwire.c` source that resolved most of this. Phase 2 is no longer "blocked on two total
-unknowns" - it's now a real, buildable (if involved) piece of work with one concrete
-remaining gate: a real in-game/ObjEdit visual test of an actual add/remove-faces edit.
+**Phase 2, "delete faces" case BUILT, verified, AND real-tool-confirmed 2026-07-08 (same
+day as re-scoping).** `compute_sort_list()`, `_region_size()`, `_pack_face_record()`, and
+`rebuild_part_mesh_region()` in `io_import_rrf.py`, wired into `MESH_OT_pe_delete_faces`
+("PE: Delete Face(s) (write to .RRF)", Edit Mode mesh context menu, v0.10.0) - the first
+operator in this project that resizes a part's mesh data and shifts every later part's
+offsets accordingly. "Add new faces" (the harder half of Phase 2 - a genuinely new face
+has no existing texture assignment to fall back on) remains a separate, not-yet-built
+follow-on - see "Phase 2 build report: delete faces" near the end of this document.
 Phase 3 remains not started/not re-scoped.
 
 This is the last major piece needed before
@@ -106,17 +108,30 @@ already fully documented.
   correlation this consistent, on a direction set that then turned out to be exactly what
   the real source uses, is real confirmation, not coincidence.
 
+  **Closed-form direction/sign convention derived and verified, 2026-07-08** (while
+  building `compute_sort_list()`): normalizing the empirical correlations above for the
+  ascending/descending sign ambiguity (sorting ascending along direction *d* is identical
+  to sorting descending along *-d*) revealed the same exact rule holds, with the same
+  sign, across every block on every one of 4 independent real parts tested (2 different
+  vehicles): **block index bit 0/1/2 (the same X/Y/Z-SMALL bits `rrDirectionToSortListNo`
+  reads) directly encodes that axis's sort-direction sign - 1 means positive, 0 means
+  negative - and each block sorts its faces by ascending face-centroid depth along that
+  direction.** E.g. block 5 (`0b101`, X+Z bits set) sorts by ascending depth along
+  `(+1,-1,+1)`. This is a genuine closed-form formula, not just "try 8 candidate
+  directions and pick the best" - implemented as `compute_sort_list()`.
+
   **What's still not pinned down exactly**: the correlation is strong but not perfect
-  (residual ~5–15% positional deviation from a plain average-vertex-centroid depth sort),
-  meaning the *precise* metric the original tool used per octant (maybe a different
-  reference point per face, e.g. nearest/farthest vertex instead of centroid, or specific
-  tie-breaking) isn't fully nailed down. **Practical implication for Phase 2**: a writer
-  that regenerates all 8 blocks as "sort this part's faces by centroid depth along the
-  correct octant's diagonal, using the exact `SORT_XSMALL`/`SORT_YSMALL`/`SORT_ZSMALL`
-  bit-to-block-index mapping confirmed above" would very likely be correct or very close
-  to it — worth a real in-game visual test (z-fighting/wrong-draw-order artifacts would be
-  the visible failure mode if the approximation isn't good enough, not a crash) before
-  trusting it blindly, but this is no longer a black box needing invention from scratch.
+  (per-block exact match after this exact formula ran ~7-19% across 4 real parts tested,
+  vs. the ~1% random-chance baseline for a permutation this size — real signal, not
+  perfect reproduction), meaning the *precise* per-face depth metric the original tool
+  used isn't fully nailed down (maybe a different reference point per face, e.g. nearest/
+  farthest vertex instead of centroid, or specific tie-breaking). **Practical implication
+  for Phase 2, now built and real-tool-tested (see the build report below)**: this
+  approximate-but-structurally-correct recipe was good enough that a real deletion test,
+  loaded in the user's actual ObjEdit build, showed no visible rendering problems -
+  encouraging evidence, though a face *deletion* only ever shrinks a sortList (no
+  genuinely new geometry needing a fresh position in the depth order), so this doesn't
+  yet prove the recipe holds up equally well once brand new faces are added.
 
 - **`attribVList`** (`vertexCount` uint16 entries, rounded up to even) — **role
   confirmed from real source, 2026-07-08; exact semantic meaning of the value itself still
@@ -262,9 +277,6 @@ still open).
 
 ### Phase 2 — add/remove faces within an existing part (same vertex/part count elsewhere)
 
-**Re-scoped 2026-07-08 with the sortList/attribVList findings above — no longer blocked
-on two total unknowns, though real work and one more real-world test remain.**
-
 Requires resizing one part's `vertexList`/`faceList`, which resizes that part's mesh
 record's own variable-length regions (`faceList`, `vertexList`, `faceNormList`,
 `vertexNormList`, `sortList`, `attribVList`). Per RRF_FORMAT.md, every "offset" field is
@@ -272,27 +284,72 @@ record's own variable-length regions (`faceList`, `vertexList`, `faceNormList`,
 resizing anything in one part's mesh data means every part *after* it in the file needs
 its own mesh record's 6 offset fields (`faceList`/`faceNormList`/`vertexList`/
 `vertexNormList`/`sortList`/`attribVList`, all in every LOD slot 0-7, not just LOD 0)
-shifted by the same byte delta. Mechanically involved, but not ambiguous — this is a
-plain, deterministic offset-rewrite once the size delta is known, not a new format
-mystery.
+shifted by the same byte delta.
 
-What's now needed to actually build this, given the findings above:
-1. **A real `sortList` builder**: for the resized part, recompute all 8 blocks using the
-   confirmed octant-direction/`SORT_XSMALL`-style bit mapping and a centroid-depth sort per
-   block (see above) — buildable now, though its output should be treated as "very likely
-   correct, not proven exact" until tested in-game.
-2. **`attribVList` carry-forward**: preserve existing vertices' values unchanged; default
-   any genuinely new vertex to `0` (the common real-file baseline for parts that never used
-   the face-splitting feature this field supports) — no invention of unknown values needed
-   for Phase 2's actual scope.
-3. **Offset rewriting for every part after the resized one** — the one piece of this phase
-   with no remaining conceptual unknown, just careful implementation (and a good test: byte-
-   diff a same-topology no-op "resize by zero" pass against the original file to catch any
-   off-by-one in the shift logic before testing an actual add/remove-faces case).
-4. **A real in-game/ObjEdit visual test of a Phase-2 edit specifically** (add or remove a
-   face, not just move a vertex) — this is the one thing Phase 1's own real-tool test
-   didn't cover, since it never changed face count/order. This is now the actual remaining
-   gate before trusting Phase 2, not a total black box needing invention from scratch.
+**"Delete faces" case: BUILT, verified, and real-tool-confirmed 2026-07-08 (see the build
+report below).** This covers removing faces (and any now-unused vertices) from a part -
+every *surviving* face already has a real texture assignment from the file, so nothing
+about texturing needs inventing for this case.
+
+**"Add new faces" is NOT built - a separate, harder problem, not a format blocker.** The
+mechanical resize/offset-shift machinery built for "delete" is identical for "add" (it's
+already fully general - `rebuild_part_mesh_region()` doesn't care whether the new face
+count is bigger or smaller than the old one). What's actually missing is a real answer to
+"what texture does a genuinely new face get?" - unlike a surviving face, a brand new one
+has no existing `textureOfset`/UV-corner data anywhere to read. Deriving a texture
+assignment purely from a new face's Blender material + UV turns out not to work either:
+this plugin's materials each represent a whole `.TLB` *file* (a shared library), not one
+specific *entry/rectangle* within it, so knowing "which material" a new face uses doesn't
+tell you which crop of that library's atlas it should show - that information doesn't
+exist anywhere until a real UV-island-to-atlas-entry allocation happens, the same kind of
+work `plan_private_skin()`/`apply_private_skin()` already do for whole-part re-skinning.
+Adding faces with real texture content most likely means reusing that same island/atlas-
+allocation machinery per new face (or group of new faces), not inventing a new mechanism
+- a real, scoped follow-on task, not a format mystery.
+
+### Phase 2 build report: delete faces (2026-07-08)
+
+`compute_sort_list()`, `_region_size()`, `_pack_face_record()`, and
+`rebuild_part_mesh_region()` in `io_import_rrf.py` implement the general resize/rebuild/
+offset-shift machinery described above. `MESH_OT_pe_delete_faces` ("PE: Delete Face(s)
+(write to .RRF)", Edit Mode mesh context menu, v0.10.0) wires this to a real operator:
+deletes the selected face(s) and any vertex left with no remaining faces, then rebuilds
+the part's whole mesh-data region and rewrites every later part's offsets accordingly.
+
+Two new per-element tracking attributes, stamped at import time
+(`build_blender_objects()`): `pe_face_index` and `pe_vertex_index`, an integer per
+face/vertex recording its original position in the file's own LOD0 arrays. BMesh
+preserves custom-layer values on surviving elements across a delete operation, so after
+deleting faces, every survivor's `pe_face_index`/`pe_vertex_index` still says exactly
+where it came from in the *original* file - letting the operator look up each surviving
+face's real `textureOfset`/UV corners (`read_face_texture_id()`/`read_face_corners()`)
+and each surviving vertex's real `attribVList` tag, rather than inventing anything.
+
+Verified on real files (`PantherG.RRF`, scratch copies), not synthetically:
+- **Simple case** (`Bow_MG` part, 5 faces): deleted 1 face via the real
+  `bpy.ops.mesh.pe_delete_faces()` call. File shrank by exactly 52 bytes (one face's
+  worth of `faceList`+`faceNormList`+`sortList` data - vertex count didn't change, no
+  orphans). Every surviving face's texture id matched its pre-delete value exactly
+  (checked as a set, since face order isn't guaranteed to be preserved 1:1). The
+  untouched part *before* it in the file (the hull) was byte-identical; the part *after*
+  it (`Raeder`) had identical geometry/texture content at its new, correctly-shifted file
+  offset.
+- **Harder case** (hull/root part, 122 faces): deleted all 4 faces sharing one vertex,
+  which orphaned 6 vertices total (removed automatically). All 8 `sortList` blocks on the
+  resulting 118-face part were confirmed as valid permutations of `0..117` - the kind of
+  corruption an off-by-one in the rebuild would produce. `attribVList` came out at the
+  correct rounded-up-to-even length. A fresh re-import showed 0 unresolved faces - every
+  survivor kept a working texture assignment.
+- **Real-tool confirmation**: deleted the furthest 2/3 of the `Main_Gun` part's 84 faces
+  (56 faces, 58 orphaned vertices) and loaded the result in the user's real ObjEdit build
+  (`PEx_105_ObjEdit.exe`, via File > Open, matching Phase 1's own launch-quirk workarounds).
+  Result: no crash, the barrel rendered as a clean, correctly truncated shorter barrel,
+  and the rest of the model (hull, turret, tracks) looked completely normal.
+- One real bug caught by the operator's own safety check, worth noting: an early test
+  script's face-selection logic (built without first deselecting all faces) accidentally
+  selected every face in the part, and `MESH_OT_pe_delete_faces` correctly refused with
+  "That would delete every face in this part" instead of silently producing an empty/
+  invalid part - the refuse-rather-than-guess pattern from Phase 1 doing its job again.
 
 ### Phase 3 — add/remove whole parts, hierarchy edits
 
@@ -324,22 +381,27 @@ evidence that `sortList` isn't sensitive to vertex position alone, since face or
 never changed and nothing rendered wrong.
 
 Phase 1 can be considered genuinely closed. **Phase 2 (add/remove faces within a part)**
-was re-scoped the same day: real engine source (`Rrdraw.c`'s `rrDirectionToSortListNo()`/
-`rrCalcSortDirection()`/`SORT_XSMALL` family, `Rrdwire.c`'s `attribVList`-interpolation
-call site) resolved both fields that were previously total unknowns - `sortList` is 8
-octant-direction-selected face-draw-order permutations (mechanism confirmed from source,
-exact per-face depth metric only ~85-96% correlated with a plain centroid sort, so
-"very likely correct, not proven exact"), and `attribVList` is a genuinely interpolatable
-per-vertex value tied to a face-splitting feature that Phase 2 doesn't need to implement
-(safe default: preserve existing values, zero-fill new vertices, matching real files'
-own common baseline).
+was re-scoped and partially built the same day: real engine source (`Rrdraw.c`'s
+`rrDirectionToSortListNo()`/`rrCalcSortDirection()`/`SORT_XSMALL` family, `Rrdwire.c`'s
+`attribVList`-interpolation call site) resolved both fields that were previously total
+unknowns, and the resulting closed-form `sortList` recipe (block index bits = axis sort-
+direction signs, ascending centroid-depth order per block) plus straightforward
+`attribVList` carry-forward were enough to build and ship the **"delete faces"** case in
+full - `MESH_OT_pe_delete_faces`, verified byte-level, via real `bpy.ops` calls on both a
+simple and a harder (multi-face, orphaned-vertex) real case, and now real-tool-confirmed
+in the user's own ObjEdit build with no crash and correct rendering (see the build report
+above). **Phase 2's "add new faces" case remains a distinct, unbuilt follow-on** - not
+because of any remaining format unknown, but because a genuinely new face has no existing
+texture assignment to read, and deriving one purely from material+UV doesn't work with
+this plugin's material-per-library (not material-per-region) convention - it needs real
+UV-island-to-atlas-entry allocation, reusing `plan_private_skin()`/`apply_private_skin()`-
+style machinery rather than inventing something new.
 
-**Recommended next step for Phase 2**: build the pieces now that the unknowns are
-resolved (a `sortList` builder using the confirmed octant/centroid-depth recipe, the
-offset-rewrite pass for every part after a resized one, `attribVList` carry-forward/
-zero-fill) - but treat "add a face, resize the part, load it in ObjEdit or the real game
-and look for z-fighting/wrong-draw-order artifacts" as the actual closing test, the same
-way Phase 1's real-tool test was the final gate there. Don't consider Phase 2 done on
-byte-level/re-import verification alone this time - the approximate nature of the
-`sortList` recipe specifically means a visual check matters more here than it did for
-Phase 1's exact vertex-position writer.
+**Recommended next step**: build "add new faces" reusing the private-skin pipeline's
+island/atlas-allocation logic, now that the resize/offset-shift/sortList-regeneration
+machinery (the genuinely new, hard infrastructure Phase 2 needed) is built, tested, and
+real-tool-confirmed via the "delete" case. Continue treating a real in-game/ObjEdit visual
+check as the closing gate for "add," not just byte-level/re-import verification - the
+`sortList` recipe is empirically strong but not proven byte-exact, and "delete" testing it
+only under a *shrinking* face count doesn't yet prove it holds up the same way once
+genuinely new faces need a position in the depth order too.
