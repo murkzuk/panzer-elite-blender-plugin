@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 8, 0),
+    "version": (0, 9, 0),
     "blender": (3, 6, 0),
-    "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode face context menu > PE: Detach Face From Shared Texture Cell",
-    "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, and detach individual faces from a shared texture cell onto their own independent copy.",
+    "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions",
+    "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, and write repositioned vertices back to the model's own .RRF (same-topology geometry edits).",
     "category": "Import-Export",
 }
 
@@ -74,6 +74,16 @@ OBJ_TYPE_NAMES = {
 def fixed_to_float(raw):
     """rrCoord/rrAngle are always 32-bit 16.16 fixed point, never plain float, in every file checked."""
     return raw / 65536.0
+
+
+def float_to_fixed(value):
+    """Inverse of fixed_to_float() - rounds to the nearest representable 16.16
+    fixed-point int32. Raises if the value doesn't fit in a signed int32 once scaled,
+    which would mean the coordinate is already far outside anything a real model uses."""
+    raw = round(value * 65536.0)
+    if not (-2**31 <= raw < 2**31):
+        raise ValueError(f"value {value} does not fit in a signed 16.16 fixed-point int32")
+    return raw
 
 
 def _corner_xy(raw_field):
@@ -1313,6 +1323,53 @@ def patch_face_corners(data, part_index, lod, face_index, min_x, min_y, max_x, m
         struct.pack_into("<I", data, off + 16, _pack(textureHalf, max_x, max_y))  # bottom-right
 
 
+def _vertex_record_offset(data, part_index, lod, vertex_index):
+    """Locates one vertex record's absolute byte offset in a raw .RRF buffer - re-reads
+    the mesh record's own vertexCount/vertexList fields directly from the file every
+    time (never assumed or cached from a prior read_rrf() call), the same way
+    _face_record_offset() does, so this stays correct even if data has already been
+    patched by an earlier call in the same session."""
+    mesh_off = _mesh_record_offset(part_index, lod)
+    vertexCount, vertexList_off = struct.unpack_from("<II", data, mesh_off + 16)
+    if not (0 <= vertex_index < vertexCount):
+        raise IndexError(
+            f"vertex_index {vertex_index} out of range (vertexCount={vertexCount}) "
+            f"for part {part_index} LOD {lod}"
+        )
+    return vertexList_off + vertex_index * VERTEX_SIZE
+
+
+def read_vertex_position(data, part_index, lod, vertex_index):
+    """Reads one vertex's raw (x, y, z) position straight from a raw buffer, the same way
+    _read_mesh_lod0() does - used to verify patch_vertex_position() actually took effect,
+    not used by the importer itself (which works from read_rrf()'s parsed RRFPart data)."""
+    off = _vertex_record_offset(data, part_index, lod, vertex_index)
+    x, y, z = struct.unpack_from("<iii", data, off)
+    return (fixed_to_float(x), fixed_to_float(y), fixed_to_float(z))
+
+
+def patch_vertex_position(data, part_index, lod, vertex_index, x, y, z):
+    """Overwrites one vertex's raw position in place - Phase 1 of the .RRF geometry
+    writer (see docs/RRF_WRITER_SCOPING.md): repositioning existing vertices without
+    adding or removing any vertex, face, or part, so face count, vertex count, and every
+    absolute offset elsewhere in the file stay exactly as they already are. Deliberately
+    does not touch faceList/sortList/attribVList/any other part's data - the same
+    "surgical patch on an exact copy" approach as patch_face_texture_id()/
+    patch_face_corners(), just applied to the vertex-position field instead.
+
+    x/y/z must already be in the file's own raw coordinate convention (world = raw vertex
+    for the root part; world = raw vertex + pivot for every other part - see
+    RRF_FORMAT.md) - this function has no notion of pivots or Blender object transforms
+    at all, matching every other patch_*() function in this module. Converting a
+    Blender-space vertex position into this raw value is the caller's job (see
+    MESH_OT_pe_write_vertex_positions)."""
+    off = _vertex_record_offset(data, part_index, lod, vertex_index)
+    struct.pack_into(
+        "<iii", data, off,
+        float_to_fixed(x), float_to_fixed(y), float_to_fixed(z),
+    )
+
+
 def _bbox(vertices):
     xs = [v[0] for v in vertices]
     ys = [v[1] for v in vertices]
@@ -1556,6 +1613,11 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_f
         obj["pe_obj_attribut"] = hex(part.obj_attribut)
         obj["pe_type_id"] = type_id
         obj["pe_type_name"] = OBJ_TYPE_NAMES.get(type_id, "UNKNOWN")
+        # Stamped separately from obj.location (even though they start out equal) so a
+        # geometry-writing operator (MESH_OT_pe_write_vertex_positions) always has the
+        # file's real pivot to convert with, even if the object itself gets moved in
+        # Object Mode after import - obj.location can drift, this can't.
+        obj["pe_pivot"] = part.pivot
         if rrf_filepath:
             obj["pe_rrf_filepath"] = rrf_filepath
 
@@ -2316,10 +2378,102 @@ class MESH_OT_pe_give_private_skin(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class MESH_OT_pe_write_vertex_positions(bpy.types.Operator):
+    """Writes the mesh's current vertex positions back into the .RRF - Phase 1 of the
+    geometry writer (see docs/RRF_WRITER_SCOPING.md). Repositions existing vertices only:
+    vertex count, face count, and every other part's data are left completely untouched,
+    so none of the format's still-unconfirmed regions (sortList, attribVList, LOD>0) are
+    touched or put at risk. Adding or removing vertices/faces in Edit Mode first is not
+    supported - the operator refuses to run if Blender's own vertex count no longer
+    matches the file's recorded count for this part.
+
+    Converts each vertex from Blender's own local mesh-space convention back to the raw
+    file value using the same convention build_blender_objects() applies on import (see
+    RRF_FORMAT.md): the root part's mesh is stored in Blender as raw-minus-pivot (since
+    its object.location already carries the pivot), so root vertices need the part's
+    pivot added back before writing; every other part's mesh is stored in Blender
+    identical to the raw file value, so no pivot arithmetic applies there at all. The
+    pivot itself is read from the pe_pivot custom property stamped at import time, not
+    from the object's own obj.location, so a later Object Mode move of the whole part
+    can't silently corrupt the write.
+
+    Moving the whole object's own transform (Object Mode translate/rotate/scale) is a
+    separate concern this operator does not handle at all - only per-vertex positions
+    edited in Edit Mode are written back; the part's own pivot/hierarchy placement in the
+    file is left completely unchanged."""
+
+    bl_idname = "mesh.pe_write_vertex_positions"
+    bl_label = "PE: Write Vertex Positions"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (
+            obj is not None
+            and obj.type == "MESH"
+            and obj.mode == "EDIT"
+            and "pe_rrf_filepath" in obj
+            and "pe_part_index" in obj
+        )
+
+    def execute(self, context):
+        obj = context.active_object
+        mesh = obj.data
+        rrf_filepath = obj["pe_rrf_filepath"]
+        part_index = obj["pe_part_index"]
+        pivot = obj.get("pe_pivot", tuple(obj.location))
+        is_root = (part_index == 0)
+
+        bm = bmesh.from_edit_mesh(mesh)
+        bm.verts.ensure_lookup_table()
+
+        try:
+            rrf_data = read_rrf_raw(rrf_filepath)
+        except OSError as e:
+            self.report({"ERROR"}, f"Could not read {rrf_filepath}: {e}")
+            return {"CANCELLED"}
+
+        try:
+            mesh_off = _mesh_record_offset(part_index, 0)
+            file_vertex_count, = struct.unpack_from("<I", rrf_data, mesh_off + 16)
+        except struct.error as e:
+            self.report({"ERROR"}, f"Could not read part {part_index}'s mesh record: {e}")
+            return {"CANCELLED"}
+
+        if len(bm.verts) != file_vertex_count:
+            self.report(
+                {"ERROR"},
+                f"Vertex count changed ({len(bm.verts)} in Blender vs. {file_vertex_count} "
+                f"in the file) - adding/removing vertices isn't supported by this operator yet.",
+            )
+            return {"CANCELLED"}
+
+        updated_count = 0
+        for vert in bm.verts:
+            lx, ly, lz = vert.co
+            if is_root:
+                x, y, z = lx + pivot[0], ly + pivot[1], lz + pivot[2]
+            else:
+                x, y, z = lx, ly, lz
+            patch_vertex_position(rrf_data, part_index, 0, vert.index, x, y, z)
+            updated_count += 1
+
+        _backup_once(rrf_filepath)
+        write_rrf_raw(rrf_filepath, rrf_data)
+
+        self.report(
+            {"INFO"},
+            f"Wrote {updated_count} vertex position(s) back to {os.path.basename(rrf_filepath)}",
+        )
+        return {"FINISHED"}
+
+
 def menu_func_detach_face(self, context):
     self.layout.operator(MESH_OT_pe_detach_face_texture.bl_idname, icon="TEXTURE")
     self.layout.operator(MESH_OT_pe_set_face_crop.bl_idname, icon="UV")
     self.layout.operator(MESH_OT_pe_give_private_skin.bl_idname, icon="IMAGE_PLANE")
+    self.layout.operator(MESH_OT_pe_write_vertex_positions.bl_idname, icon="VERTEXSEL")
 
 
 def register():
@@ -2328,6 +2482,7 @@ def register():
     bpy.utils.register_class(MESH_OT_pe_detach_face_texture)
     bpy.utils.register_class(MESH_OT_pe_set_face_crop)
     bpy.utils.register_class(MESH_OT_pe_give_private_skin)
+    bpy.utils.register_class(MESH_OT_pe_write_vertex_positions)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
     bpy.types.VIEW3D_MT_edit_mesh_context_menu.append(menu_func_detach_face)
@@ -2337,6 +2492,7 @@ def unregister():
     bpy.types.VIEW3D_MT_edit_mesh_context_menu.remove(menu_func_detach_face)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+    bpy.utils.unregister_class(MESH_OT_pe_write_vertex_positions)
     bpy.utils.unregister_class(MESH_OT_pe_give_private_skin)
     bpy.utils.unregister_class(MESH_OT_pe_set_face_crop)
     bpy.utils.unregister_class(MESH_OT_pe_detach_face_texture)

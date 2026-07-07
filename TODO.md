@@ -4,6 +4,52 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [x] **Full `.RRF` geometry writer — scoped 2026-07-08. Phase 1 (reposition existing
+  vertices, same topology) BUILT, verified, and real-tool-confirmed the same day.** The last major piece needed
+  for real OE parity on geometry (not just texturing). Full scoping (3-phase plan:
+  reposition existing vertices only → add/remove faces within a part → add/remove whole
+  parts/hierarchy edits) is in
+  [docs/RRF_WRITER_SCOPING.md](docs/RRF_WRITER_SCOPING.md).
+
+  Before writing any code, ran the cheap prerequisite check the scoping doc called for:
+  surveyed all 5,166 real `.RRF` files under `L:\Panzer Elite Ostpak3\` (33,023 parts) to
+  see whether per-part `maxVertex` ever differs from the actual LOD0 `vertexCount` —
+  **zero mismatches**. `maxVertex` is just a duplicate of `vertexCount`, not a separate
+  pre-allocated capacity, removing one of the two unknowns blocking Phase 2/3.
+
+  `read_vertex_position()`/`patch_vertex_position()` in `io_import_rrf.py` mirror the
+  existing `patch_face_texture_id()`/`patch_face_corners()` surgical-patch pattern exactly
+  (a `_vertex_record_offset()` helper, re-read fresh from the buffer on every call).
+  `MESH_OT_pe_write_vertex_positions` ("PE: Write Vertex Positions", Edit Mode mesh context
+  menu, v0.9.0) wires this to a real operator - refuses to run if the vertex count changed,
+  converts Blender-local mesh coordinates back to the file's raw convention (root part
+  needs its pivot added back; every other part's mesh data is already identical to the raw
+  file value), using a new `pe_pivot` custom property stamped on every object at import
+  time (not the object's own possibly-since-moved `obj.location`).
+
+  Verified on a real file (`PantherG.RRF`, scratch copy): byte-level (patched one vertex
+  each on the root part and a non-root part in memory, full-file diff confirmed only those
+  two 12-byte records changed anywhere), the real `bpy.ops.mesh.pe_write_vertex_positions()`
+  operator end to end on both a root and non-root part, and a fresh re-import showing the
+  moved vertex at exactly the new position while every other vertex on both parts (229 +
+  9) re-imported byte-for-byte identical to the pristine original.
+
+  **Real-tool confirmation, done 2026-07-08**: loaded a deliberately exaggerated test (one
+  hull vertex moved straight up 3 units) in the user's real, working ObjEdit build
+  (`PEx_105_ObjEdit.exe`) - rendered as a clean, isolated, correctly-placed spike with the
+  rest of the model completely intact, no crash, no wider distortion. Two real environment
+  gotchas hit and fixed along the way (worth remembering for future native-tool testing):
+  launching without an explicit working directory made the exe inherit the launcher's cwd
+  instead of its own install folder, so it couldn't find its own `MTYPE.DAT` and crashed in
+  its renderer DLL on the resulting null config; and this build doesn't support a file path
+  passed as a command-line argument at all (a Delphi "Range check error" plus another
+  access violation even with the cwd fixed) - the real fix was launching with no arguments
+  and using the app's own File > Open dialog. Phase 1 is now closed end to end. Phases 2
+  and 3 not started - see RRF_WRITER_SCOPING.md's updated recommendation for what Phase 2
+  needs to investigate first (`sortList` behavior once face *count* changes, not just
+  vertex position).
+
+
 - [x] **Give a whole vehicle its own private, freely-paintable skin — done 2026-07-07
   (the item below, "scoped 2026-07-05, not started," is now built).** Full pipeline,
   wired into a real operator:

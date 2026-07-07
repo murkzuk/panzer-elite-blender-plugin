@@ -136,12 +136,46 @@ Only covers faces that already resolved a texture (see above) - a magenta/unreso
 has no real crop rectangle to clone, so there's nothing to detach it onto. Doesn't touch
 `.RRI` files.
 
+## Reposition vertices (Phase 1 geometry writer)
+
+Real mesh editing with a write-back to the model's own `.RRF` - reshape a panel line,
+adjust a mudguard, tweak a barrel profile - without adding or removing any vertex, face,
+or part. See [RRF_WRITER_SCOPING.md](RRF_WRITER_SCOPING.md) for why this is scoped as
+"Phase 1" and what a fuller geometry writer (adding/removing faces or parts) still needs.
+
+1. Enter Edit Mode on the model, move one or more vertices however you like - just don't
+   add, delete, merge, or split any of them. Vertex *count* for the part must stay exactly
+   what it was on import.
+2. Right-click for the mesh context menu and choose **PE: Write Vertex Positions** -
+   operator id `mesh.pe_write_vertex_positions`.
+
+```python
+bpy.ops.mesh.pe_write_vertex_positions()
+```
+
+Writes every vertex's current position back into the `.RRF`, in place, in an exact copy
+of the file (the same `.bak`-backed-up, surgical-patch approach as every other writer
+here) - face count, vertex count, and every other part's data are left completely
+untouched. If Blender's own vertex count for the part no longer matches what's recorded
+in the file (i.e. you added or removed a vertex), the operator refuses to run rather than
+risk writing something the format's still-unconfirmed regions (`sortList`/`attribVList`)
+can't actually support yet.
+
+**Move the object itself (Object Mode translate/rotate/scale) separately, if at all** -
+this operator only concerns itself with per-vertex positions inside the mesh, converted
+back to the file's raw coordinate convention using the part's original pivot (stamped at
+import time as the `pe_pivot` custom property, not read from the object's own
+`obj.location`, so an accidental Object Mode move afterward can't silently corrupt what
+gets written).
+
 ## Known limitations
 
 - Only the highest-detail LOD level is imported (appropriate for editing/painting; not a
   full multi-LOD round trip).
 - Export only covers repainting existing texture assignments (Scenario A) — no new
-  `.TLB` entries or `.RRF` changes; see
+  `.TLB` entries; geometry writing is limited to repositioning existing vertices (see
+  above) — adding/removing faces or parts isn't supported yet, see
+  [RRF_WRITER_SCOPING.md](RRF_WRITER_SCOPING.md) and
   [PAINT_AND_EXPORT_SCOPING.md](PAINT_AND_EXPORT_SCOPING.md).
 - Auto-detect (used when there's no `.RRI` and no hand-supplied `.TLB`) is **always**
   reported as low confidence, no matter how clean its score looks — real testing found
