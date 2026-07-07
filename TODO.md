@@ -4,6 +4,48 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [x] **Give a whole vehicle its own private, freely-paintable skin — done 2026-07-07
+  (the item below, "scoped 2026-07-05, not started," is now built).** Full pipeline,
+  wired into a real operator:
+
+  `detect_uv_islands()` groups faces into UV islands by connectivity - a mesh edge only
+  links two faces if their UV also matches there, so an unwrap seam (which breaks UV
+  continuity) correctly becomes an island boundary rather than merging the whole model
+  into one blob. `size_islands_to_tiles()` sizes each island proportional to its own UV
+  footprint, clamped to this format's 256×256 per-face-crop cap (an engineering choice,
+  not a reverse-engineered fact - documented as such in its own docstring).
+  `pack_islands_shelf()` packs the sized islands into a fresh, empty atlas via simple
+  shelf packing (not space-optimal, but simple and correct - a real 2D bin-packer would
+  be a reasonable future upgrade if packing density ever becomes a real problem).
+
+  `plan_private_skin()`/`apply_private_skin()` wire all of that to the corner writer
+  from the entry above: every face in an island gets a new `.TLB` entry sized to fit it
+  and a real per-face crop computed from its actual UV position
+  (`patch_face_corners()`), not the all-zero fallback every previous writer used, and
+  its Blender-side UV is remapped to match the packed position.
+
+  `MESH_OT_pe_give_private_skin` ("PE: Give This Part a Private Skin") runs the whole
+  thing as one operator call: given a mesh already unwrapped (Smart UV Project or any
+  other), it writes a new dedicated `<name>_private.TLB` and a blank
+  `<name>_private_8.BMP` (borrows the part's own real palette rather than guessing one),
+  updates the `.RRF` in place with the usual automatic `.bak` backup, and assigns a
+  ready-to-paint material - no re-import needed to start painting.
+
+  Verified at every layer against real files, not just synthetically: the packing/sizing
+  algorithms unit-tested standalone (no overlaps, correct proportionality, correctly
+  raises rather than silently truncating when something doesn't fit), island detection
+  on a real 122-face PantherG part after a real Smart UV Project unwrap (31 islands,
+  proper partition of every face, zero overlaps), the full plan+apply pipeline with a
+  real new `.TLB`/`.BMP` pair written and successfully re-imported, and finally the
+  actual `bpy.ops.mesh.pe_give_private_skin()` operator end to end (poll, real execute,
+  correct material/image/file/backup state afterward).
+
+  **Known, documented scope limits, not silent gaps**: one mesh part (one Blender
+  object) at a time - these models are already split into one object per `.RRF` part,
+  so giving a whole multi-part vehicle a full private skin means running this once per
+  part, not yet a single click for an entire vehicle. Doesn't unwrap for you - requires
+  a real UV unwrap already applied. Shelf packing works but isn't space-optimal.
+
 - [x] **"The RRF opening in Blender rarely has the correct BMP on it" — texture
   resolution reliability overhaul, done 2026-07-06.** Explicit user framing after a
   night of repeated real-world failures: the same underlying problem (guessing the
@@ -137,9 +179,11 @@ Running list of things flagged during work sessions, not yet done. Newest first.
   general new-content painting - PAINT_AND_EXPORT_SCOPING.md still needs updating to
   reflect that this specific case is now built.
 
-- [ ] **Give a whole vehicle its own private, freely-paintable skin — scoped 2026-07-05,
-  not started. Bigger than "detach face"; needs real new work, not just running that
-  operator in bulk.** User's goal: import a model with *every* library it actually uses
+- [x] **Give a whole vehicle its own private, freely-paintable skin — scoped 2026-07-05,
+  BUILT 2026-07-07 (see the entry at the top of this file for what actually shipped;
+  this entry is kept as-is below for the original scoping/design-tradeoff discussion,
+  which is still accurate context for how the two candidate approaches were weighed).**
+  User's goal: import a model with *every* library it actually uses
   (multi-`.TLB` auto-detect is now done, see below - was a real prerequisite for starting
   from a complete texture baseline, not a nice-to-have), then generate a brand-new,
   dedicated `.TLB` + atlas used by nothing else, laid out with Blender's own Smart UV
