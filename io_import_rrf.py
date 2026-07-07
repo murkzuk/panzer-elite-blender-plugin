@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 7, 0),
+    "version": (0, 8, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode face context menu > PE: Detach Face From Shared Texture Cell",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, and detach individual faces from a shared texture cell onto their own independent copy.",
@@ -318,6 +318,248 @@ def find_free_atlas_space(library, sizeX, sizeY):
                 return posX, posY
 
     return None
+
+
+def detect_uv_islands(bm, uv_layer, faces=None, epsilon=1e-5):
+    """Groups faces into UV islands (connected components in UV space), for the "give a
+    whole vehicle its own private skin" workflow - each island becomes one new .TLB
+    entry, sized to fit it, once Smart UV Project (or any other unwrap) has already laid
+    out non-overlapping islands in the mesh's active UV map.
+
+    Two faces sharing a mesh edge are only counted as UV-connected if their UV
+    coordinates *at both ends of that shared edge* also match (within `epsilon`) - an
+    unwrap seam breaks UV continuity there even though the underlying mesh edge is still
+    shared, which is exactly the boundary between two different islands. Plain
+    mesh-adjacency (ignoring UV) would merge every island of a single connected
+    part into one, which is the one thing this must not do.
+
+    Returns a list of lists of face indices (each inner list is one island). Faces
+    outside `faces` (if given) are ignored entirely, including as neighbors."""
+    faces = list(faces) if faces is not None else list(bm.faces)
+    face_ids = {f.index for f in faces}
+    parent = {f.index: f.index for f in faces}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    def close(uv_a, uv_b):
+        return abs(uv_a[0] - uv_b[0]) < epsilon and abs(uv_a[1] - uv_b[1]) < epsilon
+
+    face_vert_uv = {}
+    for f in faces:
+        for loop in f.loops:
+            face_vert_uv[(f.index, loop.vert.index)] = tuple(loop[uv_layer].uv)
+
+    for f in faces:
+        for edge in f.edges:
+            v1, v2 = edge.verts[0].index, edge.verts[1].index
+            uv1_f = face_vert_uv.get((f.index, v1))
+            uv2_f = face_vert_uv.get((f.index, v2))
+            if uv1_f is None or uv2_f is None:
+                continue
+            for other in edge.link_faces:
+                if other.index == f.index or other.index not in face_ids:
+                    continue
+                uv1_o = face_vert_uv.get((other.index, v1))
+                uv2_o = face_vert_uv.get((other.index, v2))
+                if uv1_o is None or uv2_o is None:
+                    continue
+                if close(uv1_f, uv1_o) and close(uv2_f, uv2_o):
+                    union(f.index, other.index)
+
+    islands = {}
+    for f in faces:
+        islands.setdefault(find(f.index), []).append(f.index)
+    return list(islands.values())
+
+
+def size_islands_to_tiles(uv_bboxes, min_tiles=1, max_tiles=None, budget_fraction=0.6):
+    """Converts each island's UV-space bounding box (min_u, min_v, max_u, max_v) into a
+    (tiles_w, tiles_h) size in 16px-tile units for a brand-new, empty atlas, preserving
+    each island's own aspect ratio and relative size (islands that occupy more of the
+    source UV space - which Smart UV Project already scales roughly by real surface
+    area - get proportionally more atlas pixels).
+
+    This is an engineering choice, not a reverse-engineered fact: there's no "correct"
+    pixel density to give a freshly unwrapped model, since the original format has no
+    concept of one texel-per-real-world-unit standard. The approach here: treat each
+    island's UV bbox area as its relative weight, scale all islands uniformly so their
+    *total* tile area fits within `budget_fraction` of the full atlas grid (leaving
+    headroom rather than packing edge-to-edge), then round each island's own width/height
+    up to the nearest tile and clamp to [min_tiles, max_tiles] per side - `max_tiles`
+    defaults to ATLAS_GRID_WIDTH (16 tiles = 256px), this format's real per-face crop cap
+    (RRF_FORMAT.md), so no single island can ever request more than one .TLB entry can
+    actually hold.
+
+    Returns (sizes, warnings): `sizes` is a list of (tiles_w, tiles_h) parallel to
+    `uv_bboxes`; `warnings` lists any island indices that had to be clamped down from
+    their proportional size to fit the format's per-entry cap (still usable, just
+    lower-resolution than the scaling alone would have given them)."""
+    if max_tiles is None:
+        max_tiles = ATLAS_GRID_WIDTH
+    n = len(uv_bboxes)
+    if n == 0:
+        return [], []
+
+    widths = [max(max_u - min_u, 1e-9) for min_u, min_v, max_u, max_v in uv_bboxes]
+    heights = [max(max_v - min_v, 1e-9) for min_u, min_v, max_u, max_v in uv_bboxes]
+    areas = [w * h for w, h in zip(widths, heights)]
+    total_area = sum(areas) or 1e-9
+
+    atlas_tile_budget = ATLAS_GRID_WIDTH * ATLAS_GRID_HEIGHT * budget_fraction
+    # scale so that sum(px_area_i) == atlas_tile_budget, preserving each island's own
+    # aspect ratio: px_area_i = atlas_tile_budget * (area_i / total_area), and
+    # px_w_i/px_h_i = w_i/h_i (same aspect as its own UV bbox).
+    sizes = []
+    warnings = []
+    for i, (w, h) in enumerate(zip(widths, heights)):
+        target_px_area = atlas_tile_budget * (areas[i] / total_area)
+        aspect = w / h
+        # target_px_area = px_w * px_h, px_w = aspect * px_h  =>  px_h = sqrt(target_px_area / aspect)
+        px_h = max((target_px_area / aspect) ** 0.5, float(min_tiles))
+        px_w = px_h * aspect
+        tiles_w = max(min_tiles, min(max_tiles, round(max(px_w, min_tiles))))
+        tiles_h = max(min_tiles, min(max_tiles, round(max(px_h, min_tiles))))
+        if round(px_w) > max_tiles or round(px_h) > max_tiles:
+            warnings.append(i)
+        sizes.append((tiles_w, tiles_h))
+    return sizes, warnings
+
+
+def pack_islands_shelf(sizes, grid_width=None, grid_height=None):
+    """Packs a list of (tiles_w, tiles_h) sizes (16px-tile units) into a `grid_width` x
+    `grid_height` tile grid (defaults to one whole fresh .TLB atlas, ATLAS_GRID_WIDTH x
+    ATLAS_GRID_HEIGHT) using simple shelf packing: sort tallest-first, fill each row
+    left to right, start a new row once the current one won't fit the next island.
+
+    Not space-optimal (a true 2D bin-packer would do better), but simple, deterministic,
+    and easy to verify by hand - reasonable for the actual scale here (a vehicle's worth
+    of UV islands, dozens at most, packed into a 16x256-tile atlas with real headroom).
+
+    Returns a list of (posX, posY) tile-grid positions parallel to `sizes`. Raises
+    ValueError (naming which island, by index, and why) rather than silently truncating
+    or overlapping if something doesn't fit - this project's own testing found "assume
+    it always fits" a bad habit, see TODO.md's "private skin" scoping note."""
+    grid_width = ATLAS_GRID_WIDTH if grid_width is None else grid_width
+    grid_height = ATLAS_GRID_HEIGHT if grid_height is None else grid_height
+
+    order = sorted(range(len(sizes)), key=lambda i: -sizes[i][1])
+    positions = [None] * len(sizes)
+    cursor_x = 0
+    cursor_y = 0
+    shelf_height = 0
+    for i in order:
+        w, h = sizes[i]
+        if w > grid_width or h > grid_height:
+            raise ValueError(f"island {i} is {w}x{h} tiles, too big for a {grid_width}x{grid_height}-tile atlas on its own")
+        if cursor_x + w > grid_width:
+            cursor_x = 0
+            cursor_y += shelf_height
+            shelf_height = 0
+        if cursor_y + h > grid_height:
+            raise ValueError(
+                f"island {i} ({w}x{h} tiles) doesn't fit - ran out of room in the "
+                f"{grid_width}x{grid_height}-tile atlas after packing {i} of {len(sizes)} islands"
+            )
+        positions[i] = (cursor_x, cursor_y)
+        cursor_x += w
+        shelf_height = max(shelf_height, h)
+    return positions
+
+
+def plan_private_skin(bm, uv_layer, faces=None):
+    """Planning step for "give this part its own private, freely-paintable skin"
+    (TODO.md): given a mesh that already has a real UV unwrap (e.g. Smart UV Project),
+    works out everything needed to move it onto a brand-new, dedicated .TLB atlas -
+    detects UV islands, sizes each proportional to its UV footprint, and packs them into
+    a fresh empty atlas. Doesn't touch the mesh, .RRF, or any file - inspectable/testable
+    before anything is written, see apply_private_skin() for that part.
+
+    Returns (plans, warnings): `plans` is a list of
+    {"faces": [face_index,...], "bbox": (min_u,min_v,max_u,max_v), "tiles": (w,h), "pos": (posX,posY)}
+    dicts, one per island; `warnings` is the list from size_islands_to_tiles() (islands
+    that had to be clamped to the format's 256x256 per-entry cap)."""
+    faces = list(faces) if faces is not None else list(bm.faces)
+    islands = detect_uv_islands(bm, uv_layer, faces)
+
+    bboxes = []
+    for island in islands:
+        us, vs = [], []
+        for fi in island:
+            for loop in bm.faces[fi].loops:
+                u, v = loop[uv_layer].uv
+                us.append(u)
+                vs.append(v)
+        bboxes.append((min(us), min(vs), max(us), max(vs)))
+
+    sizes, warnings = size_islands_to_tiles(bboxes)
+    positions = pack_islands_shelf(sizes)
+
+    plans = [
+        {"faces": island, "bbox": bbox, "tiles": size, "pos": pos}
+        for island, bbox, size, pos in zip(islands, bboxes, sizes, positions)
+    ]
+    return plans, warnings
+
+
+def apply_private_skin(rrf_data, part_index, bm, uv_layer, plans, library):
+    """Write side of the "private skin" workflow: given plans from plan_private_skin()
+    and a TLBLibrary to add entries to (pass a fresh new_tlb_library() for a genuinely
+    new, dedicated atlas), allocates one .TLB entry per island (append_tlb_entry()),
+    repoints every face in that island at it (patch_face_texture_id()), writes each
+    face's real per-vertex crop within the island's own packed rectangle
+    (patch_face_corners()) instead of the all-zero fallback, and remaps that face's
+    Blender-side UV to its new position in the packed atlas - the same forward
+    atlas_x/atlas_y <-> u/v transform build_blender_objects() uses when reading a file
+    back in, so a re-import of the result lines up with what's written here.
+
+    Mutates rrf_data and library in place (caller writes them out - see
+    MESH_OT_pe_give_private_skin) and the mesh's UV layer directly. Returns the number
+    of faces updated."""
+    updated = 0
+    for plan in plans:
+        tiles_w, tiles_h = plan["tiles"]
+        posX, posY = plan["pos"]
+        sizeX, sizeY = tiles_w * ATLAS_TILE_SIZE, tiles_h * ATLAS_TILE_SIZE
+        new_id = append_tlb_entry(library, sizeX=sizeX, sizeY=sizeY, posX=posX, posY=posY)
+
+        min_u, min_v, max_u, max_v = plan["bbox"]
+        bbox_w = max(max_u - min_u, 1e-9)
+        bbox_h = max(max_v - min_v, 1e-9)
+
+        for face_index in plan["faces"]:
+            patch_face_texture_id(rrf_data, part_index, 0, face_index, new_id)
+            face = bm.faces[face_index]
+            xs, ys = [], []
+            for loop in face.loops:
+                u, v = loop[uv_layer].uv
+                # Local pixel position within the newly allocated entry - x increases
+                # left to right same as u; y increases top to bottom, so v (which
+                # increases "up" in Blender's UV space) has to flip, matching the same
+                # convention _corner_xy()/patch_face_corners() and the importer's own
+                # atlas_y = (1-v)*ATLAS_HEIGHT already use.
+                local_x = (u - min_u) / bbox_w * (sizeX - 1)
+                local_y = (max_v - v) / bbox_h * (sizeY - 1)
+                lx = max(0, min(255, round(local_x)))
+                ly = max(0, min(255, round(local_y)))
+                xs.append(lx)
+                ys.append(ly)
+
+                atlas_x = posX * ATLAS_TILE_SIZE + lx
+                atlas_y = posY * ATLAS_TILE_SIZE + ly
+                loop[uv_layer].uv = (atlas_x / ATLAS_WIDTH, 1.0 - atlas_y / ATLAS_HEIGHT)
+
+            patch_face_corners(rrf_data, part_index, 0, face_index, min(xs), min(ys), max(xs), max(ys))
+            updated += 1
+    return updated
 
 
 def resolve_texture_id(texture_id, slot_to_parts):
@@ -1926,9 +2168,140 @@ class MESH_OT_pe_set_face_crop(bpy.types.Operator):
         return {"CANCELLED"}
 
 
+class MESH_OT_pe_give_private_skin(bpy.types.Operator):
+    """Moves the active mesh part onto a brand-new, dedicated .TLB atlas it doesn't
+    share with anything else in the game, so it can be freely repainted without any risk
+    of also changing some other vehicle/object that happens to use the same shared
+    library - the "give a whole vehicle its own private, freely-paintable skin" feature
+    scoped in TODO.md.
+
+    Requires a real UV unwrap already applied to the mesh (Smart UV Project is the
+    intended one - this operator packs whatever islands are already there, it does not
+    unwrap for you). Detects those UV islands, sizes each proportional to its own UV
+    footprint, and packs them into a fresh empty atlas (plan_private_skin()); every face
+    gets a new .TLB entry sized to fit its own island and a real per-face crop computed
+    from its actual UV position (apply_private_skin() -> patch_face_corners()), not the
+    old all-zero/full-rectangle placeholder every prior writer used.
+
+    Writes a new dedicated `<name>_private.TLB` and a blank `<name>_private_8.BMP`
+    (borrowing this part's own current real palette, so the blank canvas starts from
+    genuine tank-paint colors rather than a guess) alongside the original .RRF, updates
+    the .RRF itself in place (with the usual automatic .bak backup), and assigns the mesh
+    a new material pointed at the fresh blank image so it's immediately ready to paint in
+    Blender's Texture Paint mode - no re-import needed.
+
+    Scope: one mesh part (one Blender object) at a time, matching how this project's
+    models are actually structured (one object per .RRF part) - run it again on each
+    part of a vehicle you want to give a full, all-over private skin. Does not attempt
+    island-level UV unwrapping itself, and (like every writer in this project) doesn't
+    touch any other object/file beyond the one it's run on.
+    """
+    bl_idname = "mesh.pe_give_private_skin"
+    bl_label = "PE: Give This Part a Private Skin"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (
+            obj is not None
+            and obj.type == "MESH"
+            and obj.mode == "EDIT"
+            and "pe_rrf_filepath" in obj
+            and "pe_part_index" in obj
+            and obj.data.uv_layers.active is not None
+        )
+
+    def execute(self, context):
+        obj = context.active_object
+        mesh = obj.data
+        rrf_filepath = obj["pe_rrf_filepath"]
+        part_index = obj["pe_part_index"]
+
+        try:
+            import numpy as np
+        except ImportError:
+            self.report({"ERROR"}, "numpy not available - can't write the new atlas bitmap")
+            return {"CANCELLED"}
+
+        bm = bmesh.from_edit_mesh(mesh)
+        uv_layer = bm.loops.layers.uv.active
+        if uv_layer is None:
+            self.report({"ERROR"}, "Mesh has no UV layer - unwrap it first (e.g. Smart UV Project)")
+            return {"CANCELLED"}
+
+        plans, size_warnings = plan_private_skin(bm, uv_layer)
+        if not plans:
+            self.report({"WARNING"}, "No faces to give a private skin")
+            return {"CANCELLED"}
+
+        try:
+            rrf_data = read_rrf_raw(rrf_filepath)
+        except OSError as e:
+            self.report({"ERROR"}, f"Could not read {rrf_filepath}: {e}")
+            return {"CANCELLED"}
+
+        # Borrow a real palette from whatever this part's faces were using before this
+        # operation, so the blank canvas starts from real tank-paint colors, not a guess.
+        palette = None
+        for mat in mesh.materials:
+            if mat is None or not mat.use_nodes:
+                continue
+            image = next(
+                (n.image for n in mat.node_tree.nodes if n.type == "TEX_IMAGE" and n.image is not None),
+                None,
+            )
+            if image is not None and "pe_tlb_filepath" in image:
+                source_bmp = find_source_bmp8(image["pe_tlb_filepath"])
+                if source_bmp:
+                    try:
+                        palette = read_bmp8_palette(source_bmp)
+                    except (OSError, ValueError):
+                        palette = None
+                    if palette:
+                        break
+        if palette is None:
+            palette = [(i, i, i) for i in range(256)]  # grayscale fallback, no real source found
+
+        library = new_tlb_library()
+        try:
+            updated = apply_private_skin(rrf_data, part_index, bm, uv_layer, plans, library)
+        except ValueError as e:
+            self.report({"ERROR"}, f"Packing failed: {e}")
+            return {"CANCELLED"}
+        bmesh.update_edit_mesh(mesh)
+
+        base = os.path.splitext(rrf_filepath)[0]
+        safe_name = "".join(c if c.isalnum() else "_" for c in mesh.name)
+        tlb_path = f"{base}_{safe_name}_private.TLB"
+        bmp_path = os.path.splitext(tlb_path)[0] + "_8.BMP"
+        blank = np.zeros((ATLAS_HEIGHT, ATLAS_WIDTH), dtype=np.uint8)
+
+        _backup_once(rrf_filepath)
+        write_rrf_raw(rrf_filepath, rrf_data)
+        write_tlb_library(tlb_path, library)
+        write_bmp8(bmp_path, blank, palette)
+
+        new_material = _build_material(safe_name + "_private", bmp_path, tlb_filepath=tlb_path, tlb_confidence="manual")
+        mesh.materials.append(new_material)
+        new_material_index = len(mesh.materials) - 1
+        for plan in plans:
+            for face_index in plan["faces"]:
+                bm.faces[face_index].material_index = new_material_index
+        bmesh.update_edit_mesh(mesh)
+
+        self.report(
+            {"INFO"},
+            f"Gave {updated} face(s) a private skin across {len(library.entries)} island(s): "
+            f"{os.path.basename(tlb_path)}" + (f" ({len(size_warnings)} island(s) clamped to max size)" if size_warnings else ""),
+        )
+        return {"FINISHED"}
+
+
 def menu_func_detach_face(self, context):
     self.layout.operator(MESH_OT_pe_detach_face_texture.bl_idname, icon="TEXTURE")
     self.layout.operator(MESH_OT_pe_set_face_crop.bl_idname, icon="UV")
+    self.layout.operator(MESH_OT_pe_give_private_skin.bl_idname, icon="IMAGE_PLANE")
 
 
 def register():
@@ -1936,6 +2309,7 @@ def register():
     bpy.utils.register_class(EXPORT_OT_rrf_atlas)
     bpy.utils.register_class(MESH_OT_pe_detach_face_texture)
     bpy.utils.register_class(MESH_OT_pe_set_face_crop)
+    bpy.utils.register_class(MESH_OT_pe_give_private_skin)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
     bpy.types.VIEW3D_MT_edit_mesh_context_menu.append(menu_func_detach_face)
@@ -1945,6 +2319,7 @@ def unregister():
     bpy.types.VIEW3D_MT_edit_mesh_context_menu.remove(menu_func_detach_face)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+    bpy.utils.unregister_class(MESH_OT_pe_give_private_skin)
     bpy.utils.unregister_class(MESH_OT_pe_set_face_crop)
     bpy.utils.unregister_class(MESH_OT_pe_detach_face_texture)
     bpy.utils.unregister_class(EXPORT_OT_rrf_atlas)
