@@ -1004,6 +1004,55 @@ def patch_face_texture_id(data, part_index, lod, face_index, new_texture_id):
     struct.pack_into("<I", data, off + 12, 0x80000000 | new_texture_id)
 
 
+def read_face_corners(data, part_index, lod, face_index):
+    """Reads a face's current v1/v2/v3/textureHalf UV corner bytes straight from a raw
+    buffer, via the same fields and decode as _corner_xy() - used to verify
+    patch_face_corners() actually took effect. Returns (v1_xy, v2_xy, v3_xy) for a
+    triangle, or (v1_xy, v2_xy, v3_xy, textureHalf_xy) for a quad."""
+    off = _face_record_offset(data, part_index, lod, face_index)
+    v1, v2, v3, _textureOfset, textureHalf, materialInfo = struct.unpack_from("<IIIIII", data, off)
+    corners = [_corner_xy(v1), _corner_xy(v2), _corner_xy(v3)]
+    if materialInfo & MAT_QUAD:
+        corners.append(_corner_xy(textureHalf))
+    return tuple(corners)
+
+
+def patch_face_corners(data, part_index, lod, face_index, min_x, min_y, max_x, max_y):
+    """Overwrites one face's v1/v2/v3/textureHalf UV corner bytes in place to crop a
+    specific (min_x,min_y)-(max_x,max_y) rectangle - pixel offsets within whichever .TLB
+    entry the face is assigned to, each 0-255 (RRF_FORMAT.md's per-face crop cap) -
+    instead of the "no crop data, use the entry's full rectangle" all-zero fallback every
+    prior writer in this project used (see PAINT_AND_EXPORT_SCOPING.md Scenario B). This
+    is the "corners from real UV coordinates" piece that was missing.
+
+    Corner-to-field assignment confirmed two independent ways: this project's own
+    read-side (_corner_xy(), itself sourced from the real game's Rrdwire.c
+    rrSetTexture), and separately from real community source - Aldo/Brit44's own
+    RRF-writing code, shared on the private PEDG forum (2026-07-07, "UV stile artwork"
+    thread) - which packs corners in exactly this same pattern:
+    v1=top-right (max_x,min_y), v2=top-left (min_x,min_y), v3=bottom-left (min_x,max_y),
+    textureHalf=bottom-right (max_x,max_y). textureHalf only exists/is used for quads
+    (MAT_QUAD set in materialInfo); triangles only ever use v1/v2/v3.
+
+    Only rewrites the upper 16 bits of each vertex field (the packed corner bytes) - the
+    lower 16 bits (the actual mesh vertex index) are read back and preserved unchanged,
+    the same way patch_face_texture_id() preserves textureOfset's own unrelated bits."""
+    if not all(0 <= v <= 255 for v in (min_x, min_y, max_x, max_y)):
+        raise ValueError(f"corner values must fit in a byte (0-255): got {(min_x, min_y, max_x, max_y)}")
+    off = _face_record_offset(data, part_index, lod, face_index)
+    v1, v2, v3, _textureOfset, textureHalf, materialInfo = struct.unpack_from("<IIIIII", data, off)
+    is_quad = bool(materialInfo & MAT_QUAD)
+
+    def _pack(field, x, y):
+        return (field & 0xFFFF) | (y << 24) | (x << 16)
+
+    struct.pack_into("<I", data, off + 0, _pack(v1, max_x, min_y))   # v1 = top-right
+    struct.pack_into("<I", data, off + 4, _pack(v2, min_x, min_y))   # v2 = top-left
+    struct.pack_into("<I", data, off + 8, _pack(v3, min_x, max_y))   # v3 = bottom-left
+    if is_quad:
+        struct.pack_into("<I", data, off + 16, _pack(textureHalf, max_x, max_y))  # bottom-right
+
+
 def _bbox(vertices):
     xs = [v[0] for v in vertices]
     ys = [v[1] for v in vertices]
