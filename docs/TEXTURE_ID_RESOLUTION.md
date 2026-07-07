@@ -146,6 +146,49 @@ The resolution method and confidence are also stamped onto the imported data its
 Blender's own UI, not just something that scrolled by in the operator report at import
 time.
 
+## Theatre picker — narrowing auto-detect the way ObjEdit actually does it
+
+The real ObjEdit doesn't score anything when it opens a model — it just asks the user a
+direct question via a "Select Theatre" dialog (Desert / Italy / Normandy / Custom A /
+Custom B / Custom C / None) and filters its own search to that theatre's libraries. This
+plugin's own auto-detect, by contrast, was scoring *every* `.TLB` in the search folder
+against each other regardless of theatre — real content confirms this genuinely causes
+cross-theatre false competitors (e.g. `PantherG.RRF`'s correct answer, `CustomA1.TLB`,
+previously had `CustomC1.TLB` — an unrelated theatre — sitting right behind it at the
+same 100% score, purely coincidental generic-material overlap).
+
+`IMPORT_OT_rrf.theatre` (v0.11.0) adds the same question as an import option — `AUTO` (no
+filter, the original behavior) or one of the six theatres — and `find_matching_tlbs()`'s
+new `name_prefix` parameter filters candidates to just that prefix (`Desert*`, `Italy*`,
+`Normandy*`, `CustomA*`, `CustomB*`, `CustomC*`) before scoring. **The model's own folder
+location is not a reliable default for this** — `PantherG.RRF` sits in `Normandy_Obj` but
+its real answer is Custom A — so the picker doesn't try to guess a starting value, it asks
+plainly, the same way ObjEdit does.
+
+Tested against the same two real historical problem cases from the section above, not
+synthetically:
+
+- **PantherG.RRF**: `AUTO` already found the correct `CustomA1.TLB` at 100%, but flagged
+  `CustomC1.TLB` (also 100%, unrelated theatre) as its closest competitor. Filtering to
+  `CUSTOM_A` kept the same correct winner but replaced that irrelevant cross-theatre
+  competitor with a real same-theatre one (`CustomA10.TLB`, 93%) — a more honest signal,
+  even though the winning pick didn't change here.
+- **Psw232.RRF**: `AUTO` guessed `CustomA8.TLB` (30%, wrong — matches the historical
+  wrong-guess pattern already documented above). Filtering to `DESERT` found *no* match
+  at all, rather than another plausible-looking wrong guess. This isn't the filter
+  failing — a real `.RRI` cross-check confirms this model's true answer needs three
+  separate libraries together (`Desert1`/`Desert11`/`Desert13`), one of which
+  (`Desert13`) is missing from disk entirely, and even the one that *is* present
+  resolves 0% of this model's ids on its own. No filter can find a file that isn't
+  there — this is the same known limitation as before, not a new one. An honest "nothing
+  found" is arguably the better outcome here than a plausible-looking wrong guess,
+  though it doesn't fully solve this specific model.
+
+**Bottom line**: the theatre picker measurably reduces cross-theatre false-positive
+noise and avoids some wrong guesses outright, but it's not a cure for cases needing
+multiple partial libraries or missing files — those remain genuinely hard, same as
+documented in the confidence section above.
+
 ## Genuinely unrecoverable faces: much rarer than previously believed
 
 After the modulo fix, real test content resolves in the 88-100% range per model, with

@@ -4,6 +4,34 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [x] **Theatre picker for TLB auto-detect — built and tested 2026-07-08.** User pointed
+  out the real ObjEdit doesn't guess at all - its "Select Theatre" dialog just asks
+  Desert/Italy/Normandy/Custom A/Custom B/Custom C/None directly and searches only that
+  theatre's libraries. Real `.TLB` filenames confirm the pattern (`Desert1-8.TLB`,
+  `Italy1-6.TLB`, `Normandy1-6.TLB` shipped with the base game; `CustomA*`/`CustomB*`/
+  `CustomC*` added by mods) - and the model's own containing folder is *not* a reliable
+  stand-in for this (`PantherG.RRF` sits in `Normandy_Obj` but its real answer is Custom
+  A), so ObjEdit's plain-question approach is the right one to mirror, not something to
+  cleverly infer.
+
+  Added `find_matching_tlbs(..., name_prefix=...)` (filters candidates by name prefix
+  before scoring) and `IMPORT_OT_rrf.theatre` (v0.11.0, mirrors the six real ObjEdit
+  options plus "Auto" for the original unfiltered behavior) - only affects the
+  last-resort auto-detect step, never `.RRI`/manual override priority.
+
+  Tested against the same two real historical wrong-guess cases documented in
+  `TEXTURE_ID_RESOLUTION.md`: on `PantherG.RRF`, the theatre filter kept the same
+  already-correct winner (`CustomA1.TLB`) but replaced an irrelevant cross-theatre
+  runner-up (`CustomC1.TLB`, coincidental 100% overlap) with a real same-theatre one -
+  more honest signal, not a different answer. On `Psw232.RRF`, filtering to `DESERT`
+  returned no match at all rather than repeating the historical wrong guess
+  (`CustomA8.TLB`, 30%) - confirmed via this model's own real `.RRI` that its true answer
+  needs three separate Desert libraries together, one of which (`Desert13`) is missing
+  from disk entirely, so no filter can conjure a correct answer here. **Genuine, tested
+  improvement (removes cross-theatre false positives, avoids some wrong guesses
+  outright) - not a fix for cases needing multiple partial libraries or missing files,
+  which remain a documented, separate limitation.**
+
 - [ ] **Priority note (2026-07-08): user is focused on this Blender plugin first.** A
   possible future Godot rewrite of Panzer Elite ("Cogs of War") came up the same day, but
   it's explicitly a separate, not-yet-started effort in its own project directory - see

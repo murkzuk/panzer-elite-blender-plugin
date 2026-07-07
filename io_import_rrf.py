@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 10, 0),
+    "version": (0, 11, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -14,7 +14,7 @@ import shutil
 import bpy
 import bmesh
 from bpy_extras.io_utils import ImportHelper, ExportHelper
-from bpy.props import StringProperty, BoolProperty
+from bpy.props import StringProperty, BoolProperty, EnumProperty
 from mathutils import Matrix
 
 ATLAS_EXPECTED_SIZE = (256, 4096)
@@ -32,6 +32,21 @@ MAT_SHADING_DEEP = 0x3
 MAT_TEXTRUE_MASK = 0xC
 MAT_QUAD = 0x10
 OBJ_ATTRIB_HIDE = 0x80000000
+
+# Mirrors the real ObjEdit's own "Select Theatre" dialog (Desert/Italy/Normandy/Custom A/
+# Custom B/Custom C/None) - it doesn't guess which library a model uses, it just asks the
+# user this exact question and filters by name prefix. Confirmed against the real Texture
+# folder: Desert1-8.TLB, Italy1-6.TLB, Normandy1-6.TLB ship with the base game; CustomA*/
+# CustomB*/CustomC* are typically added by mods. See find_matching_tlbs()'s name_prefix
+# parameter and IMPORT_OT_rrf.theatre.
+THEATRE_PREFIXES = {
+    "DESERT": "Desert",
+    "ITALY": "Italy",
+    "NORMANDY": "Normandy",
+    "CUSTOM_A": "CustomA",
+    "CUSTOM_B": "CustomB",
+    "CUSTOM_C": "CustomC",
+}
 
 # .TLB texture library format (decoded from ObjEdit\ImageLibUnit.pas Save1Click/LoadLib):
 # header(8) + libPal(2048) + libMatPal(256) then libParts[4096] @ 112 bytes each.
@@ -880,7 +895,7 @@ def _classify_tlb_confidence(scored, total_resolved, total_ids):
     )
 
 
-def find_matching_tlbs(folder, unique_texture_ids, min_ratio=0.15, min_absolute=3):
+def find_matching_tlbs(folder, unique_texture_ids, min_ratio=0.15, min_absolute=3, name_prefix=None):
     """Like find_best_tlb(), but returns every library worth using instead of just the
     single best-scoring one - models that genuinely draw from several libraries at once
     (common on larger/older vehicles) resolve far fewer faces if only one is tried, even
@@ -898,6 +913,18 @@ def find_matching_tlbs(folder, unique_texture_ids, min_ratio=0.15, min_absolute=
     variants (e.g. CustomA/CustomB/CustomC copies of the same content) from all being
     added redundantly just because they happen to share the same generic materials.
     Stops early once every id is covered.
+
+    name_prefix: if given, only .TLB files whose basename starts with this (case-
+    insensitive) are even considered - mirrors the real ObjEdit's own "Select Theatre"
+    dialog (Desert/Italy/Normandy/Custom A/Custom B/Custom C), which asks the user this
+    exact question rather than guessing. Real files bear this out: the base game's
+    shared Texture folder holds cleanly prefixed libraries (Desert1-8.TLB, Italy1-6.TLB,
+    Normandy1-6.TLB), with CustomA*/CustomB*/CustomC* typically added by mods. Narrowing
+    to one prefix before scoring removes most of the close cross-theatre competitors that
+    otherwise cause wrong guesses (confirmed repeatedly in this project's own testing -
+    see TEXTURE_ID_RESOLUTION.md) - a real, substantially more reliable question to ask
+    than "which of all ~26+ libraries scores best," since the user usually already knows
+    which theatre a given model belongs to even when they don't know the exact filename.
 
     Returns (matches, confidence, reason): matches is a list of (path, tlb_parts,
     atlas_image_path, score) tuples, in the order libraries were added (best overall
@@ -917,6 +944,11 @@ def find_matching_tlbs(folder, unique_texture_ids, min_ratio=0.15, min_absolute=
         entries = sorted(os.listdir(folder))
     except OSError:
         return [], "low", "could not list the texture folder"
+
+    if name_prefix:
+        entries = [name for name in entries if name.lower().startswith(name_prefix.lower())]
+        if not entries:
+            return [], "low", f"no .TLB in this folder starts with '{name_prefix}'"
 
     candidates = [os.path.join(folder, name) for name in entries if name.lower().endswith(".tlb")]
 
@@ -1907,6 +1939,25 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
         default="",
     )
 
+    theatre: EnumProperty(
+        name="Theatre",
+        description="Same question the real ObjEdit asks when it opens a model - which "
+                    "texture set does this belong to? Narrows auto-detect to just .TLB "
+                    "files with that name prefix before scoring, instead of guessing "
+                    "across every library in the folder. Ignored if Texture Library "
+                    "(.TLB) above is set, or if a real .RRI is found and used",
+        items=[
+            ("AUTO", "Auto (no filter)", "Score every .TLB in the folder - the original, unfiltered auto-detect behavior"),
+            ("DESERT", "Desert", "Only consider .TLB files named Desert*"),
+            ("ITALY", "Italy", "Only consider .TLB files named Italy*"),
+            ("NORMANDY", "Normandy", "Only consider .TLB files named Normandy*"),
+            ("CUSTOM_A", "Custom A", "Only consider .TLB files named CustomA*"),
+            ("CUSTOM_B", "Custom B", "Only consider .TLB files named CustomB*"),
+            ("CUSTOM_C", "Custom C", "Only consider .TLB files named CustomC*"),
+        ],
+        default="AUTO",
+    )
+
     def execute(self, context):
         try:
             parts = read_rrf(self.filepath)
@@ -1950,10 +2001,12 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
             auto_derived = not self.tlb_search_folder and search_folder is not None
             if search_folder:
                 unique_ids = sorted({t for part in parts for t in part.face_texture_id if t is not None})
-                matches, confidence, confidence_reason = find_matching_tlbs(search_folder, unique_ids)
+                name_prefix = THEATRE_PREFIXES.get(self.theatre)
+                matches, confidence, confidence_reason = find_matching_tlbs(search_folder, unique_ids, name_prefix=name_prefix)
                 origin_note = " (auto-found sibling Texture folder)" if auto_derived else ""
+                theatre_note = f", theatre={self.theatre.replace('_', ' ').title()}" if name_prefix else ""
                 if not matches:
-                    detect_msg = f" - auto-detect{origin_note} found no good TLB match among {len(unique_ids)} unique texture ID(s)"
+                    detect_msg = f" - auto-detect{origin_note}{theatre_note} found no good TLB match among {len(unique_ids)} unique texture ID(s)"
                 else:
                     built = {}
                     skipped_no_atlas = []
@@ -1963,7 +2016,7 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
                             continue
                         built[slot] = (tlb_parts, atlas_image_path, path)
                     names = ", ".join(os.path.basename(path) for path, *_ in matches)
-                    detect_msg = f" - auto-detected {len(matches)} .TLB(s){origin_note}: {names}"
+                    detect_msg = f" - auto-detected {len(matches)} .TLB(s){origin_note}{theatre_note}: {names}"
                     if skipped_no_atlas:
                         self.report({"WARNING"}, f"No matching _24.BMP/_8.BMP for: {', '.join(skipped_no_atlas)} - those libraries skipped")
                     if built:

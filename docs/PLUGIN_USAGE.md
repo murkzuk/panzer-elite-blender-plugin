@@ -32,11 +32,20 @@ bpy.ops.import_scene.pe_rrf(filepath=r"...\Model.RRF", tlb_filepath=r"...\Some.T
 
 # Point the auto-detect scan at a different folder than the auto-derived sibling one
 bpy.ops.import_scene.pe_rrf(filepath=r"...\Model.RRF", tlb_search_folder=r"...\SomeOtherTexture")
+
+# Same question the real ObjEdit's "Select Theatre" dialog asks - narrows auto-detect to
+# just .TLB files starting with that prefix (Desert*/Italy*/Normandy*/CustomA*/CustomB*/
+# CustomC*) before scoring, instead of guessing across every library in the folder. The
+# model's own folder location is NOT a reliable default for this (a Normandy_Obj model can
+# genuinely use a Custom A skin) - pick whichever theatre you know this model to be.
+bpy.ops.import_scene.pe_rrf(filepath=r"...\Model.RRF", theatre="CUSTOM_A")
 ```
 
 Priority order: `tlb_filepath` (manual) > `.RRI` (if present and `use_rri` is on,
 default) > `tlb_search_folder` (explicit override, if given) > auto-derived sibling
-`Texture\` folder > geometry only.
+`Texture\` folder > geometry only. `theatre` only affects the last (auto-detect) step -
+see [TEXTURE_ID_RESOLUTION.md](TEXTURE_ID_RESOLUTION.md#theatre-picker--narrowing-auto-detect-the-way-objedit-actually-does-it)
+for what it does and doesn't fix.
 
 ## What you get
 
