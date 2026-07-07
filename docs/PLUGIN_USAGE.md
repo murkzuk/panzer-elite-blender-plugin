@@ -39,6 +39,15 @@ bpy.ops.import_scene.pe_rrf(filepath=r"...\Model.RRF", tlb_search_folder=r"...\S
 # model's own folder location is NOT a reliable default for this (a Normandy_Obj model can
 # genuinely use a Custom A skin) - pick whichever theatre you know this model to be.
 bpy.ops.import_scene.pe_rrf(filepath=r"...\Model.RRF", theatre="CUSTOM_A")
+
+# Color-key transparency (see below) is on by default with a white key color. Override
+# the key color for content known to use a different reserved color (e.g. bright
+# pink/magenta, reportedly used by some PP2-X-sourced libraries):
+bpy.ops.import_scene.pe_rrf(filepath=r"...\Model.RRF", colorkey_color=(1.0, 0.0, 1.0))
+
+# Turn color-key transparency off entirely for a model where the key color is itself
+# meaningful paint (rare, but possible):
+bpy.ops.import_scene.pe_rrf(filepath=r"...\Model.RRF", use_colorkey=False)
 ```
 
 Priority order: `tlb_filepath` (manual) > `.RRI` (if present and `use_rri` is on,
@@ -205,6 +214,33 @@ any surviving face's original texture data can't be read for some reason.
 **Same `.bak`-backed-up write as every other operator here.** Requires the mesh to still
 carry the `pe_face_index`/`pe_vertex_index` data stamped at import time - re-import with
 this plugin version if you're working from a model imported by an older one.
+
+## Color-key transparency
+
+Real 1999-era engines commonly reserve one color as "don't draw this pixel" instead of
+storing real per-pixel alpha. Confirmed on a real model: `6pdr.RRF`'s wheel part had
+spoke-gap faces sampling exact pure white (1.0, 1.0, 1.0) while every other sampled face
+on the same part showed normal metal/paint tones - a clean, deliberate reserved color,
+not incidental. Digging into the real engine source backs this up structurally too:
+`libMatPal`/`screenWin16PalMatID` in `rrobjpex`/`RRF object hex` feeds a per-texture-
+library "material type" into the hardware texture upload call - consistent with
+transparency being a per-library rendering convention, not something that varies face by
+face within the same library.
+
+**On by default** (`use_colorkey=True`, `colorkey_color=(1.0, 1.0, 1.0)` - white, the
+confirmed real case). `_build_material()` wires a `Vector Math (Distance)` node comparing
+the sampled texture color against the key color, then a `Math (Greater Than)` node
+turning that distance into a binary alpha value, into the material's own Alpha input -
+verified end-to-end on the real `6pdr.RRF` wheel (byte-exact node-graph math check, and a
+real EEVEE render showing a clean, fully-detailed wheel with no white patches, versus the
+solid opaque white the same model showed before this fix).
+
+**The key color is not a fixed universal constant** - reportedly some PP2-X-sourced
+content uses bright pink/magenta instead of white for the same convention - so it's a
+real, overridable per-import setting (`colorkey_color`), not hardcoded. Turn off entirely
+(`use_colorkey=False`) for content where the key color is itself meaningful paint (the
+private-skin operator's own fresh blank paint canvas already does this automatically, to
+avoid punching holes in a canvas that hasn't been painted yet).
 
 ## Known limitations
 

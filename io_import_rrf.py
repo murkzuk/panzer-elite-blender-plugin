@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 11, 0),
+    "version": (0, 12, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -14,7 +14,7 @@ import shutil
 import bpy
 import bmesh
 from bpy_extras.io_utils import ImportHelper, ExportHelper
-from bpy.props import StringProperty, BoolProperty, EnumProperty
+from bpy.props import StringProperty, BoolProperty, EnumProperty, FloatVectorProperty
 from mathutils import Matrix
 
 ATLAS_EXPECTED_SIZE = (256, 4096)
@@ -1633,7 +1633,21 @@ def detect_add_pivot_convention(parts):
     return {part.index: True for part in parts[1:] if part.vertices}
 
 
-def _build_material(root_name, image_path, tlb_filepath=None, tlb_confidence=None):
+COLORKEY_DISTANCE_THRESHOLD = 0.05  # Euclidean RGB distance (0-1 per channel, max ~1.73)
+
+
+def _build_material(root_name, image_path, tlb_filepath=None, tlb_confidence=None, use_colorkey=True, colorkey_color=(1.0, 1.0, 1.0)):
+    """use_colorkey/colorkey_color: real 1999-era engines commonly render one reserved
+    color as "don't draw this pixel" instead of storing real per-pixel alpha - confirmed
+    on a real model (6pdr.RRF/Desert2.tlb): the wheel part's spoke-gap faces sample exact
+    pure white (1.0,1.0,1.0) while every other sampled face on the same part samples
+    normal metal/wheel tones, a clean signal this is a deliberate reserved color, not
+    incidental. This isn't a fixed universal constant, though - the same convention on
+    PP2-X-sourced content reportedly uses bright pink/magenta instead - so the key color
+    is a real, per-import setting (default white, the confirmed real case), not hardcoded.
+    Wires a distance-from-key-color test into the material's own Alpha input; set
+    use_colorkey=False for content where the key color is itself meaningful paint (e.g. a
+    blank paintable canvas that happens to start off white)."""
     image = bpy.data.images.load(image_path, check_existing=True)
     if tlb_filepath:
         # Lets face-level operators (e.g. "detach face from shared texture cell", see
@@ -1658,6 +1672,20 @@ def _build_material(root_name, image_path, tlb_filepath=None, tlb_confidence=Non
     tex_node.interpolation = "Closest"  # this is 1999 paletted atlas art, keep it crisp
     if bsdf is not None:
         material.node_tree.links.new(tex_node.outputs["Color"], bsdf.inputs["Base Color"])
+        if use_colorkey:
+            distance_node = material.node_tree.nodes.new("ShaderNodeVectorMath")
+            distance_node.operation = "DISTANCE"
+            distance_node.inputs[1].default_value = tuple(colorkey_color)
+            material.node_tree.links.new(tex_node.outputs["Color"], distance_node.inputs[0])
+
+            threshold_node = material.node_tree.nodes.new("ShaderNodeMath")
+            threshold_node.operation = "GREATER_THAN"
+            threshold_node.inputs[1].default_value = COLORKEY_DISTANCE_THRESHOLD
+            material.node_tree.links.new(distance_node.outputs["Value"], threshold_node.inputs[0])
+            material.node_tree.links.new(threshold_node.outputs["Value"], bsdf.inputs["Alpha"])
+
+            material.blend_method = "CLIP"
+            material.alpha_threshold = 0.5
     # Blender's Texture Paint mode paints onto whichever Image Texture node is the node
     # tree's *active* node, not just any node carrying an image - left at the default (the
     # Material Output node the material starts with), Texture Paint has no canvas to paint
@@ -1715,7 +1743,7 @@ def _recalculate_normals(mesh):
     bm.free()
 
 
-def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_filepath=None, tlb_confidence=None):
+def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_filepath=None, tlb_confidence=None, use_colorkey=True, colorkey_color=(1.0, 1.0, 1.0)):
     """slot_sources: {slot_index: (tlb_parts, atlas_image_path, tlb_filepath)} or None for
     geometry-only import. A model can use several libraries at once (one per slot) - each
     gets its own material, built once here and shared across every part/mesh, since the
@@ -1741,7 +1769,7 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_f
             material = atlas_path_to_material.get(atlas_image_path)
             if material is None:
                 label = os.path.splitext(os.path.basename(atlas_image_path))[0]
-                material = _build_material(f"{root_name}_{label}", atlas_image_path, tlb_filepath, tlb_confidence)
+                material = _build_material(f"{root_name}_{label}", atlas_image_path, tlb_filepath, tlb_confidence, use_colorkey, colorkey_color)
                 atlas_path_to_material[atlas_image_path] = material
             slot_to_material[slot] = material
 
@@ -1958,6 +1986,30 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
         default="AUTO",
     )
 
+    use_colorkey: BoolProperty(
+        name="Color-Key Transparency",
+        description="Treat one reserved color as transparent instead of solid, matching "
+                    "a real 1999-era engine convention - confirmed on a real model "
+                    "(6pdr.RRF/Desert2.tlb) where wheel-spoke gaps sample exact pure "
+                    "white while the rest of the same part samples normal paint colors. "
+                    "Turn off for content where the key color is itself meaningful paint",
+        default=True,
+    )
+
+    colorkey_color: FloatVectorProperty(
+        name="Key Color",
+        description="The reserved color treated as transparent when Color-Key "
+                    "Transparency is on. Default (white) is the confirmed real "
+                    "convention for base-game content - some other content (e.g. "
+                    "PP2-X-sourced libraries) reportedly uses bright pink/magenta "
+                    "instead, so this is a per-import setting, not a fixed constant",
+        subtype="COLOR",
+        size=3,
+        default=(1.0, 1.0, 1.0),
+        min=0.0,
+        max=1.0,
+    )
+
     def execute(self, context):
         try:
             parts = read_rrf(self.filepath)
@@ -2056,7 +2108,8 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
         context.scene.collection.children.link(collection)
 
         objects, resolved_count, unresolved_count = build_blender_objects(
-            parts, collection, root_name, slot_sources, rrf_filepath=self.filepath, tlb_confidence=tlb_confidence
+            parts, collection, root_name, slot_sources, rrf_filepath=self.filepath, tlb_confidence=tlb_confidence,
+            use_colorkey=self.use_colorkey, colorkey_color=tuple(self.colorkey_color),
         )
 
         msg = f"Imported {len(parts)} part(s) from {root_name}.rrf" + detect_msg
@@ -2613,7 +2666,10 @@ class MESH_OT_pe_give_private_skin(bpy.types.Operator):
         write_tlb_library(tlb_path, library)
         write_bmp8(bmp_path, blank, palette)
 
-        new_material = _build_material(safe_name + "_private", bmp_path, tlb_filepath=tlb_path, tlb_confidence="manual")
+        # A brand new, blank paint canvas has no real color-key content yet - applying
+        # the same-color-is-transparent rule here would just punch the whole blank
+        # canvas full of holes the moment it's created, not a real texture to preserve.
+        new_material = _build_material(safe_name + "_private", bmp_path, tlb_filepath=tlb_path, tlb_confidence="manual", use_colorkey=False)
         mesh.materials.append(new_material)
         new_material_index = len(mesh.materials) - 1
         for plan in plans:

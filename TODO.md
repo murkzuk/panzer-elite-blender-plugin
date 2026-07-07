@@ -4,6 +4,32 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [x] **Color-key transparency — built and real-render-verified 2026-07-08.** User
+  reported `6pdr.RRF`'s wheel spoke gaps rendering solid white instead of see-through.
+  Direct pixel sampling confirmed a genuine, deliberate pattern: the wheel part's
+  spoke-gap faces sample exact pure white (1.0,1.0,1.0) while every other sampled face on
+  the same part shows normal metal/paint tones - a real 1999-era engine convention
+  (reserve one color as "don't draw this," instead of storing per-pixel alpha), not
+  incidental. Traced supporting structure in the real engine source too:
+  `libMatPal`/`screenWin16PalMatID` (`rrobjpex`/`RRF object hex`) feeds a per-texture-
+  library "material type" into the hardware texture upload call, consistent with this
+  being a per-library convention.
+
+  `_build_material()` now wires a `Vector Math (Distance)` + `Math (Greater Than)` node
+  chain into the material's Alpha input, comparing each sampled pixel against a
+  configurable key color - on by default (`use_colorkey=True`, white). **The key color
+  is not hardcoded** - user noted PP2-X-sourced content reportedly uses bright
+  pink/magenta for the same convention instead, so `colorkey_color` is a real per-import
+  override, not a fixed constant. The private-skin operator's own fresh blank canvas
+  passes `use_colorkey=False` explicitly, since color-keying an unpainted canvas would
+  just punch it full of holes.
+
+  Verified on the real `6pdr.RRF`/`CustomA4.tlb` case: node-graph math confirmed white
+  pixels correctly compute alpha=0 and normal wheel colors compute alpha=1, and a real
+  EEVEE render of just the wheel part showed a clean, fully-detailed wheel (tread +
+  spoke/hub pattern) with zero white patches, versus the same model's solid opaque white
+  before this fix.
+
 - [x] **Theatre picker for TLB auto-detect — built and tested 2026-07-08.** User pointed
   out the real ObjEdit doesn't guess at all - its "Select Theatre" dialog just asks
   Desert/Italy/Normandy/Custom A/Custom B/Custom C/None directly and searches only that
