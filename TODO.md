@@ -4,6 +4,13 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [ ] **Priority note (2026-07-08): user is focused on this Blender plugin first.** A
+  possible future Godot rewrite of Panzer Elite ("Cogs of War") came up the same day, but
+  it's explicitly a separate, not-yet-started effort in its own project directory - see
+  `L:\2025\PE\PE SOURCE\COGS_OF_WAR_GODOT_HANDOFF.md` for the starting-point index
+  whenever that begins. Until then, treat this repo's own backlog below as the active
+  priority, not something to pause for Godot exploration.
+
 - [x] **`.RRF` geometry writer Phase 2, "delete faces" case — re-scoped from real engine
   source AND built/verified/real-tool-confirmed, all 2026-07-08.** Phase 2 was previously
   blocked on two total unknowns (`sortList`, `attribVList` - see the Phase 1 entry below).
