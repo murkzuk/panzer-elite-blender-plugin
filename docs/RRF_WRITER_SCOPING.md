@@ -6,7 +6,14 @@ verified, AND real-tool-confirmed the same day** - `read_vertex_position()`/
 `MESH_OT_pe_write_vertex_positions` ("PE: Write Vertex Positions", Edit Mode mesh context
 menu, v0.9.0). The one open item from the build report below (a real visual check in
 ObjEdit) is now done - see "Real-tool confirmation" at the end of the Phase 1 section.
-Phases 2 and 3 remain not started.
+
+**Phase 2 re-scoped the same day, from real engine source, not built yet.** Both of the
+format regions that were blocking it (`sortList`, `attribVList`) are now substantially
+understood - see "What's genuinely unknown or risky" below for the real `Rrdraw.c`/
+`Rrdwire.c` source that resolved most of this. Phase 2 is no longer "blocked on two total
+unknowns" - it's now a real, buildable (if involved) piece of work with one concrete
+remaining gate: a real in-game/ObjEdit visual test of an actual add/remove-faces edit.
+Phase 3 remains not started/not re-scoped.
 
 This is the last major piece needed before
 "replace ObjEdit" (see [[project_pe_blender_plugin_goal]]) is true for geometry, not just
@@ -58,21 +65,96 @@ already fully documented.
 
 ## What's genuinely unknown or risky (the real scoping problem)
 
-- **`sortList`** (`faceCount × 8` uint16 entries): a precomputed face-draw-order
-  permutation per one of 8 coarse view directions. Never reconstructed or even read by
-  this project — only its *existence and size* are documented. If the engine actually
-  relies on this for correct draw order (plausible, since it exists specifically to avoid
-  a per-frame sort), a writer that adds/removes faces without correctly regenerating all 8
-  permutations risks visibly wrong z-ordering (overlapping semi-transparent or two-sided
-  faces drawing in the wrong order) rather than an outright crash — the kind of subtle bug
-  that's easy to ship without noticing. **Needs real investigation before any writer that
-  changes face count is attempted**: does the game visibly misbehave with a naive/trivial
-  sortList (e.g. front-to-back index order duplicated 8×), or does it only matter for
-  specific material types? Untested.
-- **`attribVList`** (`vertexCount` uint16 entries, rounded up to even): "a per-vertex
-  attribute tag used when the original editor splits faces" per RRF_FORMAT.md — the
-  precise semantics were never pinned down beyond that description. Unknown whether a
-  writer can safely zero-fill this or whether specific values are load-bearing.
+- **`sortList`** (`faceCount × 8` uint16 entries) — **substantially resolved, 2026-07-08,
+  from real engine source, not just data analysis.** Confirmed against `rrobjpex\Rrdraw.c`
+  (`rrDirectionToSortListNo()`, `rrCalcSortDirection()`, and the `SORT_XSMALL`/`SORT_YSMALL`/
+  `SORT_ZSMALL`/`SORT_XBIG`/`SORT_YBIG`/`SORT_ZBIG` constants in `Headers\SCENE.H`, also
+  independently defined in `rrobjpex\Tank.c`):
+
+  ```c
+  int32 rrDirectionToSortListNo(int32 dirFlag)
+  {
+     int32 listNo=0;
+     if(dirFlag&SORT_XSMALL) listNo|=1;
+     if(dirFlag&SORT_YSMALL) listNo|=2;
+     if(dirFlag&SORT_ZSMALL) listNo|=4;
+     return(listNo);
+  }
+  ```
+
+  The 8 blocks are **the 8 octants of 3D space**: block index = a 3-bit code built from
+  the sign of the camera/view direction's X, Y, and Z components *in the part's own local
+  space* (bit 0 = X negative, bit 1 = Y negative, bit 2 = Z negative — derived from
+  `rrCalcSortDirection()`'s `mat`-transformed axis projections). At render time,
+  `rrDefineSortlist()` just picks `sortListBasis + sortInfo*maxFaces` — i.e. it selects
+  which of the file's 8 *already-baked* orderings to use for the current camera direction;
+  it does **not** compute the ordering itself at runtime. That per-octant baking is exactly
+  what a writer has to reproduce.
+
+  Confirmed empirically too (before finding the source above, and independently
+  corroborating it): surveyed real `sortList` data on several real parts
+  (`PantherG.RRF`/`Pz4H.RRF` hulls) and found (1) every one of the 8 blocks is a clean,
+  valid permutation of `0..faceCount-1` (no stray/flagged values, e.g. no bit-15-tagged
+  "skip this face" entries in any real file checked, even though `Rrdwire.c`'s render loop
+  has a `faceOrderList[faceNo]&0x8000` skip check — that mechanism, if real, is either
+  runtime-only or simply unused in every real shipped file this project has access to);
+  and (2) sorting each part's own face centroids by depth along the corresponding octant's
+  diagonal direction (the 8 `(±1,±1,±1)`-normalized vectors) correlates strongly with the
+  stored block order — Spearman's ρ of **0.85–0.96** across every block tested, and
+  every single best-fit direction landed on the octant-diagonal set, never on a
+  compass-heading-around-one-axis set (several were tried and scored far worse) — a
+  correlation this consistent, on a direction set that then turned out to be exactly what
+  the real source uses, is real confirmation, not coincidence.
+
+  **What's still not pinned down exactly**: the correlation is strong but not perfect
+  (residual ~5–15% positional deviation from a plain average-vertex-centroid depth sort),
+  meaning the *precise* metric the original tool used per octant (maybe a different
+  reference point per face, e.g. nearest/farthest vertex instead of centroid, or specific
+  tie-breaking) isn't fully nailed down. **Practical implication for Phase 2**: a writer
+  that regenerates all 8 blocks as "sort this part's faces by centroid depth along the
+  correct octant's diagonal, using the exact `SORT_XSMALL`/`SORT_YSMALL`/`SORT_ZSMALL`
+  bit-to-block-index mapping confirmed above" would very likely be correct or very close
+  to it — worth a real in-game visual test (z-fighting/wrong-draw-order artifacts would be
+  the visible failure mode if the approximation isn't good enough, not a crash) before
+  trusting it blindly, but this is no longer a black box needing invention from scratch.
+
+- **`attribVList`** (`vertexCount` uint16 entries, rounded up to even) — **role
+  confirmed from real source, 2026-07-08; exact semantic meaning of the value itself still
+  open.** Confirmed in `Rrdwire.c` (both copies, `RRF object hex\` and `rrobjpex\`), inside
+  the function that subdivides ("splits") one face into a finer `sx × sy` grid — the same
+  routine RRF_FORMAT.md's own corner-encoding facts came from:
+
+  ```c
+  va1=obj->partArray[splitObjNo].meshArray[0].attribVList[v1];
+  va2=obj->partArray[splitObjNo].meshArray[0].attribVList[v2];
+  va3=obj->partArray[splitObjNo].meshArray[0].attribVList[v3];
+  va4=obj->partArray[splitObjNo].meshArray[0].attribVList[v4];
+  rrCalcAttribList(sx,sy,va1,va2,va3,va4,newAttribVList);
+  ```
+
+  This mirrors exactly how the same function interpolates vertex *positions*
+  (`rrCalc3DArrays(... vList, newVertexList)`) and *normals*
+  (`rrCalc3DArrays(... vNormList, newVertexNormList)`) across the new subdivision grid —
+  i.e. `attribVList` is a genuine **interpolatable per-vertex numeric value**, smoothly
+  blended across a face split exactly like position/normal, not a discrete flag/bitmask.
+  This is consistent with the real value patterns already observed (e.g. one part's unique
+  values were `[0, 264, 520, 776, 1032, 1288, ...]` — evenly-spaced-ish numbers, exactly the
+  shape you'd expect from an interpolated quantity, not a small set of independent flag
+  bits) and with RRF_FORMAT.md's original "used when the original editor splits faces"
+  description, now with a real mechanism behind it instead of just a guess.
+
+  **What this doesn't yet tell us**: what the interpolated *quantity itself* represents
+  (lighting/shading weight? a texture-tile coordinate distinct from the face-corner UV
+  bytes? something else?) — `rrCalcAttribList`'s own body wasn't found/inspected in this
+  pass. **Practical implication for Phase 2**: many real parts checked have **all-zero**
+  `attribVList` data (e.g. `PantherG`'s own hull, `Schuerzen`, `Turmblende`) — i.e. zero is
+  a real, common, safe value for parts that were never put through this specific
+  face-splitting/tessellation feature. For a Phase 2 writer that isn't itself implementing
+  large-face texture-tile subdivision, the safe approach is: leave every **untouched**
+  vertex's `attribVList` entry exactly as it already was, and default any genuinely **new**
+  vertex's entry to `0` (matching the common real-file baseline) rather than inventing a
+  value — this side-steps the open "what does the number mean" question entirely for the
+  cases Phase 2 actually needs to handle.
 - **Per-part `maxVertex` vs. the mesh record's own `vertexCount`** — **checked, 2026-07-08:
   they never differ.** Surveyed all 5,166 real `.RRF` files under
   `L:\Panzer Elite Ostpak3\` (33,023 real parts, zero parse errors) comparing each part's
@@ -180,14 +262,37 @@ still open).
 
 ### Phase 2 — add/remove faces within an existing part (same vertex/part count elsewhere)
 
-Requires resizing one part's `vertexList`/`faceList`, which shifts every offset in that
-part's own mesh record and (if any part after it in the file references absolute
-offsets past this point — need to confirm whether offsets are part-relative or truly
-file-absolute in a way that requires rewriting *every subsequent part*, not just this
-one) potentially every part after it too. This is the phase that makes `sortList`/
-`attribVList` unavoidable — can't be skipped once face count changes. **Blocked on the
-two open investigations above** (does a naive/regenerated `sortList` render correctly;
-what does `attribVList` actually need to contain).
+**Re-scoped 2026-07-08 with the sortList/attribVList findings above — no longer blocked
+on two total unknowns, though real work and one more real-world test remain.**
+
+Requires resizing one part's `vertexList`/`faceList`, which resizes that part's mesh
+record's own variable-length regions (`faceList`, `vertexList`, `faceNormList`,
+`vertexNormList`, `sortList`, `attribVList`). Per RRF_FORMAT.md, every "offset" field is
+**already confirmed absolute from the start of the file**, not part-relative — so
+resizing anything in one part's mesh data means every part *after* it in the file needs
+its own mesh record's 6 offset fields (`faceList`/`faceNormList`/`vertexList`/
+`vertexNormList`/`sortList`/`attribVList`, all in every LOD slot 0-7, not just LOD 0)
+shifted by the same byte delta. Mechanically involved, but not ambiguous — this is a
+plain, deterministic offset-rewrite once the size delta is known, not a new format
+mystery.
+
+What's now needed to actually build this, given the findings above:
+1. **A real `sortList` builder**: for the resized part, recompute all 8 blocks using the
+   confirmed octant-direction/`SORT_XSMALL`-style bit mapping and a centroid-depth sort per
+   block (see above) — buildable now, though its output should be treated as "very likely
+   correct, not proven exact" until tested in-game.
+2. **`attribVList` carry-forward**: preserve existing vertices' values unchanged; default
+   any genuinely new vertex to `0` (the common real-file baseline for parts that never used
+   the face-splitting feature this field supports) — no invention of unknown values needed
+   for Phase 2's actual scope.
+3. **Offset rewriting for every part after the resized one** — the one piece of this phase
+   with no remaining conceptual unknown, just careful implementation (and a good test: byte-
+   diff a same-topology no-op "resize by zero" pass against the original file to catch any
+   off-by-one in the shift logic before testing an actual add/remove-faces case).
+4. **A real in-game/ObjEdit visual test of a Phase-2 edit specifically** (add or remove a
+   face, not just move a vertex) — this is the one thing Phase 1's own real-tool test
+   didn't cover, since it never changed face count/order. This is now the actual remaining
+   gate before trusting Phase 2, not a total black box needing invention from scratch.
 
 ### Phase 3 — add/remove whole parts, hierarchy edits
 
@@ -219,9 +324,22 @@ evidence that `sortList` isn't sensitive to vertex position alone, since face or
 never changed and nothing rendered wrong.
 
 Phase 1 can be considered genuinely closed. **Phase 2 (add/remove faces within a part)**
-is the next candidate, but it's the phase that first has to actually confront `sortList`/
-`attribVList` rather than sidestep them - expect it to need its own investigation into
-what a naive/regenerated `sortList` does to real rendering (this Phase 1 test only showed
-that `sortList` tolerates unchanged face order with moved vertices, not that it tolerates
-being rebuilt or approximated after a face-count change) before writing any code that
-depends on getting it right.
+was re-scoped the same day: real engine source (`Rrdraw.c`'s `rrDirectionToSortListNo()`/
+`rrCalcSortDirection()`/`SORT_XSMALL` family, `Rrdwire.c`'s `attribVList`-interpolation
+call site) resolved both fields that were previously total unknowns - `sortList` is 8
+octant-direction-selected face-draw-order permutations (mechanism confirmed from source,
+exact per-face depth metric only ~85-96% correlated with a plain centroid sort, so
+"very likely correct, not proven exact"), and `attribVList` is a genuinely interpolatable
+per-vertex value tied to a face-splitting feature that Phase 2 doesn't need to implement
+(safe default: preserve existing values, zero-fill new vertices, matching real files'
+own common baseline).
+
+**Recommended next step for Phase 2**: build the pieces now that the unknowns are
+resolved (a `sortList` builder using the confirmed octant/centroid-depth recipe, the
+offset-rewrite pass for every part after a resized one, `attribVList` carry-forward/
+zero-fill) - but treat "add a face, resize the part, load it in ObjEdit or the real game
+and look for z-fighting/wrong-draw-order artifacts" as the actual closing test, the same
+way Phase 1's real-tool test was the final gate there. Don't consider Phase 2 done on
+byte-level/re-import verification alone this time - the approximate nature of the
+`sortList` recipe specifically means a visual check matters more here than it did for
+Phase 1's exact vertex-position writer.

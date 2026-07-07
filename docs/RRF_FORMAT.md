@@ -122,10 +122,33 @@ own pivot, placed by translating to that pivot), not a coincidence specific to o
 All "offset" fields are byte offsets from the start of the file (equivalent to the
 in-memory object base address the original loader added them to).
 
-- `sortList`: `faceCount × 8` `uint16` entries — a precomputed face-draw-order
-  permutation per one of 8 coarse view directions (avoids a per-frame sort).
+- `sortList`: `faceCount × 8` `uint16` entries, as 8 contiguous blocks of `faceCount`
+  entries each (confirmed layout - an interleaved/stride-8 reading was tested and fails)
+  — a precomputed face-draw-order permutation per one of 8 coarse view directions (avoids
+  a per-frame sort). Confirmed directly from the real renderer source
+  (`rrobjpex\Rrdraw.c`'s `rrDirectionToSortListNo()`/`rrCalcSortDirection()`, and the
+  `SORT_XSMALL`/`SORT_YSMALL`/`SORT_ZSMALL` constants also used in `Tank.c`): the 8
+  directions are the 8 **octants of 3D space** — block index is a 3-bit code built from
+  the sign of the view direction's local X/Y/Z components
+  (`listNo = (Xneg?1:0)|(Yneg?2:0)|(Zneg?4:0)`). The renderer only *selects* among the 8
+  pre-baked blocks for the current camera direction at runtime (`rrDefineSortlist()`); it
+  never computes an ordering itself. Real per-block content correlates strongly
+  (Spearman's ρ = 0.85–0.96, every part checked) with sorting that block's own faces by
+  centroid depth along the corresponding octant's `(±1,±1,±1)`-diagonal direction — strong
+  evidence for the algorithm's shape, though the exact per-face depth metric isn't
+  confirmed to be plain centroid distance (residual ~5–15% positional deviation). See
+  [RRF_WRITER_SCOPING.md](RRF_WRITER_SCOPING.md) for the full writeup and what this means
+  for a writer that needs to regenerate this field.
 - `attribVList`: `vertexCount` (rounded up to even) `uint16` entries, indexed by vertex —
-  a per-vertex attribute tag used when the original editor splits faces.
+  a per-vertex attribute tag used when the original editor splits faces. Confirmed
+  directly from `Rrdwire.c` (the same face-subdivision function this doc's own UV-corner
+  facts came from): read per-corner-vertex and passed through `rrCalcAttribList()`,
+  interpolated across a new subdivision grid exactly like vertex position/normal in the
+  same function — a genuine interpolatable per-vertex value, not a discrete flag/bitmask.
+  The exact physical quantity it represents is still unconfirmed, but real files commonly
+  have it all-zero for parts never put through this specific tessellation feature — see
+  [RRF_WRITER_SCOPING.md](RRF_WRITER_SCOPING.md) for what this means in practice for a
+  writer.
 
 ### Face record (24 bytes)
 

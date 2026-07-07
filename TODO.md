@@ -4,6 +4,42 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [ ] **`.RRF` geometry writer Phase 2 (add/remove faces within a part) — re-scoped
+  2026-07-08 from real engine source, not built yet.** Phase 2 was previously blocked on
+  two total unknowns (`sortList`, `attribVList` - see the Phase 1 entry below). Both are
+  now substantially resolved by finding and reading the real source that defines them,
+  not just data analysis:
+
+  - **`sortList`**: confirmed in `rrobjpex\Rrdraw.c` (`rrDirectionToSortListNo()`,
+    `rrCalcSortDirection()`) plus the `SORT_XSMALL`/`SORT_YSMALL`/`SORT_ZSMALL` constants
+    (`Headers\SCENE.H`, also independently defined in `rrobjpex\Tank.c`) - the 8 blocks are
+    the 8 octants of 3D space, block index = a 3-bit code from the sign of the view
+    direction's local X/Y/Z components. The runtime only *selects* among 8 pre-baked
+    orderings (`rrDefineSortlist()`) - it never computes them, confirming a writer really
+    does have to bake all 8 per part. Empirically corroborated too: every real block
+    checked is a clean permutation of `0..faceCount-1` (no bit-15-flagged skip entries in
+    any real file, even though the render loop has a check for one), and sorting face
+    centroids by depth along each block's corresponding octant-diagonal direction
+    correlates at Spearman's ρ = 0.85-0.96 - strong, but not exact, meaning the precise
+    per-face depth metric the original tool used isn't 100% nailed down yet.
+  - **`attribVList`**: confirmed in `Rrdwire.c` (the same face-subdivision function
+    RRF_FORMAT.md's own corner-encoding facts came from) - it's read per-corner-vertex and
+    passed through `rrCalcAttribList(sx,sy,va1,va2,va3,va4,newAttribVList)`, interpolated
+    across a new subdivision grid exactly like vertex position/normal are in the same
+    function. A genuine interpolatable per-vertex value tied to a face-splitting/
+    tessellation feature, not a flag - and since many real parts have all-zero
+    `attribVList` data, Phase 2 can safely preserve existing values and zero-fill any
+    genuinely new vertex without needing to know what the value actually represents.
+
+  Full write-up with the real source quotes is in
+  [docs/RRF_WRITER_SCOPING.md](docs/RRF_WRITER_SCOPING.md) ("What's genuinely unknown or
+  risky" and the re-scoped "Phase 2" section). **Not built yet** - what's left is real
+  implementation (a `sortList` builder using the confirmed recipe, the offset-rewrite pass
+  for every part after a resized one, `attribVList` carry-forward/zero-fill) plus a real
+  in-game/ObjEdit visual test of an actual add/remove-faces edit specifically, since the
+  approximate (not proven-exact) `sortList` recipe means this phase needs its own visual
+  gate, not just byte-level/re-import verification the way Phase 1 got away with.
+
 - [x] **Full `.RRF` geometry writer — scoped 2026-07-08. Phase 1 (reposition existing
   vertices, same topology) BUILT, verified, and real-tool-confirmed the same day.** The last major piece needed
   for real OE parity on geometry (not just texturing). Full scoping (3-phase plan:
