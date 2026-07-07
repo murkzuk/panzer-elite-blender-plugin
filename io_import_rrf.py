@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 6, 0),
+    "version": (0, 7, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode face context menu > PE: Detach Face From Shared Texture Cell",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, and detach individual faces from a shared texture cell onto their own independent copy.",
@@ -1798,14 +1798,144 @@ class MESH_OT_pe_detach_face_texture(bpy.types.Operator):
         return {"CANCELLED"}
 
 
+class MESH_OT_pe_set_face_crop(bpy.types.Operator):
+    """Writes the selected face(s)' *current* Blender UV position back into the .RRF as
+    real per-face crop corners (patch_face_corners()), instead of the all-zero "use the
+    whole entry" fallback every face starts with. Move/scale a face's UV within its
+    assigned texture cell in Blender's own UV editor, then run this to persist that exact
+    crop back to the file - the write-side counterpart to how the importer builds UVs
+    from corners in the first place (build_blender_objects()'s atlas_x/atlas_y <-> u/v
+    transform, inverted here).
+
+    Only repositions the crop *within* the face's already-assigned .TLB entry - it does
+    not reassign which entry/library a face uses (see MESH_OT_pe_detach_face_texture for
+    that). Does not support non-rectangular UV shapes: whatever shape the face's UV loops
+    describe, only their axis-aligned bounding rectangle is written, since the file
+    format only ever stores one rectangle per face (RRF_FORMAT.md) - a face UV'd as a
+    rotated or non-rectangular shape in Blender will be cropped to its bounding box, not
+    reproduced exactly.
+    """
+    bl_idname = "mesh.pe_set_face_crop"
+    bl_label = "PE: Write Face Crop From UV"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (
+            obj is not None
+            and obj.type == "MESH"
+            and obj.mode == "EDIT"
+            and "pe_rrf_filepath" in obj
+            and "pe_part_index" in obj
+        )
+
+    def execute(self, context):
+        obj = context.active_object
+        mesh = obj.data
+        rrf_filepath = obj["pe_rrf_filepath"]
+        part_index = obj["pe_part_index"]
+
+        bm = bmesh.from_edit_mesh(mesh)
+        selected_faces = [f for f in bm.faces if f.select]
+        if not selected_faces:
+            self.report({"WARNING"}, "No faces selected")
+            return {"CANCELLED"}
+
+        uv_layer = bm.loops.layers.uv.active
+        if uv_layer is None:
+            self.report({"ERROR"}, "Mesh has no UV layer - nothing to write")
+            return {"CANCELLED"}
+
+        try:
+            rrf_data = read_rrf_raw(rrf_filepath)
+        except OSError as e:
+            self.report({"ERROR"}, f"Could not read {rrf_filepath}: {e}")
+            return {"CANCELLED"}
+
+        tlb_cache = {}
+        updated_count = 0
+        skipped_count = 0
+
+        for face in selected_faces:
+            face_index = face.index
+            try:
+                texture_id = read_face_texture_id(rrf_data, part_index, 0, face_index)
+            except (IndexError, struct.error):
+                skipped_count += 1
+                continue
+
+            material_index = face.material_index
+            if material_index >= len(mesh.materials) or mesh.materials[material_index] is None:
+                skipped_count += 1
+                continue
+            material = mesh.materials[material_index]
+            image = next(
+                (n.image for n in material.node_tree.nodes if n.type == "TEX_IMAGE" and n.image is not None),
+                None,
+            ) if material.use_nodes else None
+            if image is None or "pe_tlb_filepath" not in image:
+                self.report({"WARNING"}, f"Face {face_index}: material has no traceable .TLB source - skipped")
+                skipped_count += 1
+                continue
+            tlb_filepath = image["pe_tlb_filepath"]
+
+            library = tlb_cache.get(tlb_filepath)
+            if library is None:
+                try:
+                    library = read_tlb_library(tlb_filepath)
+                except (OSError, ValueError) as e:
+                    self.report({"WARNING"}, f"Face {face_index}: could not read {tlb_filepath}: {e}")
+                    skipped_count += 1
+                    continue
+                tlb_cache[tlb_filepath] = library
+
+            entry_id = texture_id % TLB_MAX_PARTS
+            entry = next((e for e in library.entries if e.id == entry_id), None)
+            if entry is None:
+                self.report({"WARNING"}, f"Face {face_index}: texture id {texture_id} doesn't resolve to any entry in {tlb_filepath} - skipped")
+                skipped_count += 1
+                continue
+
+            # Invert the same atlas_x/atlas_y <-> u/v transform build_blender_objects()
+            # uses to place UVs from corners in the first place.
+            xs, ys = [], []
+            for loop in face.loops:
+                u, v = loop[uv_layer].uv
+                atlas_x = u * ATLAS_WIDTH
+                atlas_y = (1.0 - v) * ATLAS_HEIGHT
+                lx = atlas_x - entry.posX * ATLAS_TILE_SIZE
+                ly = atlas_y - entry.posY * ATLAS_TILE_SIZE
+                xs.append(max(0, min(255, round(lx))))
+                ys.append(max(0, min(255, round(ly))))
+
+            patch_face_corners(rrf_data, part_index, 0, face_index, min(xs), min(ys), max(xs), max(ys))
+            updated_count += 1
+
+        if updated_count:
+            _backup_once(rrf_filepath)
+            write_rrf_raw(rrf_filepath, rrf_data)
+
+        msg = f"Wrote crop for {updated_count} face(s) from their current UV"
+        if skipped_count:
+            msg += f", skipped {skipped_count}"
+        if updated_count:
+            self.report({"INFO"}, msg)
+            return {"FINISHED"}
+        self.report({"WARNING"}, msg or "Nothing updated")
+        return {"CANCELLED"}
+
+
 def menu_func_detach_face(self, context):
     self.layout.operator(MESH_OT_pe_detach_face_texture.bl_idname, icon="TEXTURE")
+    self.layout.operator(MESH_OT_pe_set_face_crop.bl_idname, icon="UV")
 
 
 def register():
     bpy.utils.register_class(IMPORT_OT_rrf)
     bpy.utils.register_class(EXPORT_OT_rrf_atlas)
     bpy.utils.register_class(MESH_OT_pe_detach_face_texture)
+    bpy.utils.register_class(MESH_OT_pe_set_face_crop)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
     bpy.types.VIEW3D_MT_edit_mesh_context_menu.append(menu_func_detach_face)
@@ -1815,6 +1945,7 @@ def unregister():
     bpy.types.VIEW3D_MT_edit_mesh_context_menu.remove(menu_func_detach_face)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+    bpy.utils.unregister_class(MESH_OT_pe_set_face_crop)
     bpy.utils.unregister_class(MESH_OT_pe_detach_face_texture)
     bpy.utils.unregister_class(EXPORT_OT_rrf_atlas)
     bpy.utils.unregister_class(IMPORT_OT_rrf)
