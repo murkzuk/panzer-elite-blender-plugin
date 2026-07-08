@@ -4,6 +4,50 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [x] **Fixed a real crop-size bug in the all-zero-corners fallback — confirmed and
+  built 2026-07-08.** User reported `88Pak43.RRF`'s gun shield/barrel rendering
+  smeared/stretched. Traced to a genuine bug (not just an approximation): the importer's
+  fallback for a face with no explicit crop (`v1`/`v2`/`v3`/`textureHalf` all `(0,0)` -
+  confirmed the universal convention across every real file checked, 0/1490 faces with
+  any explicit crop) was using the assigned `.TLB` entry's own *full allocated* size -
+  but real content routinely uses only *part* of a larger shared entry (confirmed via a
+  live ObjEdit comparison: entry 160 is allocated 32x32, but ObjEdit's own Image Lib tool
+  showed the actual face using only a 32x16 crop). The real crop size is packed into
+  `materialInfo` bits 8-11/12-15 (`((nibble)+1)*16` per axis) - confirmed against the
+  real engine source (`Rrdwire.c rrUsedSelection()`) and empirically sensible across
+  every distinct `materialInfo` value on the same part (always a clean 16px-multiple
+  submultiple of the entry's own size, consistent with one entry commonly being shared
+  by several faces, each using its own smaller sub-tile).
+
+  `_read_mesh_lod0()` now computes this real crop size per face (`face_crop_size`, a new
+  `RRFPart` field); `build_blender_objects()`'s all-zero-corner fallback uses it instead
+  of the entry's full size. Verified end-to-end: a real ObjEdit-baked test file with the
+  corrected values loaded and rendered "so much better" per direct user comparison
+  against the original file.
+
+  **One remaining edge case, likely bad source data, not pursued further**: one specific
+  face (the front glacis plate, `materialInfo` giving crop 48x16 from a 48x48 entry)
+  still looked visibly off after the fix. Checked the referenced library entry (123)
+  directly in ObjEdit's own Image Lib tool per the user's own judgement - it "looks off"
+  there too, independent of anything this plugin does - most likely a genuinely
+  unusual/damaged entry in this specific `.TLB`, not a remaining formula bug.
+
+- [x] **Found a real, on-demand way to generate an authoritative `.RRI` for any model —
+  2026-07-08.** Previously, a model with no `.RRI` had no reliable texture-library
+  answer at all - auto-detect is always low-confidence by design (see
+  TEXTURE_ID_RESOLUTION.md), and no analysis of the `.RRF`/`.TLB` files alone can
+  substitute for the genuine slot-assignment record only a real `.RRI` carries. Traced
+  `TObjectEditForm.SaveObject1Click` in ObjEdit's own Delphi source
+  (`ObjEdit\OEMainUnit.pas`): **every File > Save in ObjEdit automatically writes a real
+  `.RRI` from whichever libraries are actually loaded in the editor at that moment** -
+  not a guess, ObjEdit's own confirmed state. This means any model can get a genuine,
+  authoritative `.RRI` on demand: open it in ObjEdit, load libraries until it renders
+  correctly, File > Save (**to a copy - this also re-writes the `.RRF` itself, the one
+  real caveat**), then use the resulting `.RRI` going forward. Documented in
+  [RRI_FORMAT.md](docs/RRI_FORMAT.md#generating-a-real-rri-for-a-model-that-doesnt-have-one).
+  Doesn't help with per-face crop questions (RRI only ever records library assignments),
+  which remain a `.RRF`-internal, format-level question with no equivalent shortcut.
+
 - [x] **Color-key transparency — built and real-render-verified 2026-07-08.** User
   reported `6pdr.RRF`'s wheel spoke gaps rendering solid white instead of see-through.
   Direct pixel sampling confirmed a genuine, deliberate pattern: the wheel part's

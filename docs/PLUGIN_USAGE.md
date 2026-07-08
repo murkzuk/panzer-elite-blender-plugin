@@ -258,7 +258,11 @@ avoid punching holes in a canvas that hasn't been painted yet).
   A low-confidence import escalates the operator report to a warning and stamps
   `pe_tlb_confidence = "low"` on the atlas image. Prefer keeping/restoring a model's
   real `.RRI` file whenever one exists — it's stamped `"rri"` and is the authoritative
-  answer, not a scored guess.
+  answer, not a scored guess. **A model with no `.RRI` isn't stuck guessing forever** -
+  open it in ObjEdit, load whichever library/libraries make it render correctly, then
+  File > Save (to a copy, not the original) to generate a real, authoritative `.RRI` on
+  the spot. See [RRI_FORMAT.md](RRI_FORMAT.md#generating-a-real-rri-for-a-model-that-doesnt-have-one)
+  for the exact mechanism and the one real caveat (it re-saves the `.RRF` too).
 - A small number of individual texture IDs may still fail to resolve even with the
   correct library — in practice a handful of faces at most, likely stale/removed `.TLB`
   entries rather than a systematic limitation.

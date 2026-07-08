@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 12, 0),
+    "version": (0, 13, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -114,6 +114,7 @@ class RRFPart:
     __slots__ = (
         "index", "name", "pivot", "obj_attribut", "parent_no", "child_count",
         "child_array", "vertices", "faces", "face_texture_id", "face_uv_corners",
+        "face_crop_size",
     )
 
 
@@ -1157,6 +1158,7 @@ def _read_mesh_lod0(data, mesh_off):
     faces = []
     face_texture_id = []
     face_uv_corners = []
+    face_crop_size = []
     for i in range(faceCount):
         off = faceList_off + i * FACE_SIZE
         v1, v2, v3, textureOfset, textureHalf, materialInfo = struct.unpack_from("<IIIIII", data, off)
@@ -1184,11 +1186,25 @@ def _read_mesh_lod0(data, mesh_off):
             if is_quad:
                 corners.append(_corner_xy(textureHalf))
             face_uv_corners.append(tuple(corners))
+            # The real crop size a face actually uses within its assigned .TLB entry -
+            # confirmed real (2026-07-08) against a live ObjEdit comparison on 88Pak43.RRF/
+            # Normandy1.tlb entry 160: ObjEdit showed this face using a 32x16 crop, not the
+            # entry's own full 32x32 allocation - materialInfo bits 8-11/12-15 give that
+            # 32x16 size directly ((nibble+1)*16 per axis), also confirmed sensible across
+            # every distinct materialInfo value on that same part (always <= the entry's
+            # own allocated size, in clean 16px multiples - consistent with one entry often
+            # being shared by several faces, each using its own smaller sub-tile of it).
+            # Also confirmed against the real engine source (Rrdwire.c rrUsedSelection()):
+            # FSizeX=(((materialInfo&0xf00)>>8)+1)*16, FSizeY=(((materialInfo&0xf000)>>12)+1)*16.
+            crop_size_x = (((materialInfo & 0x0F00) >> 8) + 1) * 16
+            crop_size_y = (((materialInfo & 0xF000) >> 12) + 1) * 16
+            face_crop_size.append((crop_size_x, crop_size_y))
         else:
             face_texture_id.append(None)
             face_uv_corners.append(None)
+            face_crop_size.append(None)
 
-    return vertices, faces, face_texture_id, face_uv_corners
+    return vertices, faces, face_texture_id, face_uv_corners, face_crop_size
 
 
 def read_rrf(filepath):
@@ -1217,7 +1233,7 @@ def read_rrf(filepath):
         objAttribut, maxVertex, parentNo, childCount = struct.unpack_from("<IIII", data, off + 80)
         childArray = struct.unpack_from("<32I", data, off + 96)
 
-        vertices, faces, face_texture_id, face_uv_corners = _read_mesh_lod0(data, off + 224)
+        vertices, faces, face_texture_id, face_uv_corners, face_crop_size = _read_mesh_lod0(data, off + 224)
 
         part = RRFPart()
         part.index = p
@@ -1231,6 +1247,7 @@ def read_rrf(filepath):
         part.faces = faces
         part.face_texture_id = face_texture_id
         part.face_uv_corners = face_uv_corners
+        part.face_crop_size = face_crop_size
         parts.append(part)
 
     return parts
@@ -1842,12 +1859,23 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_f
                         # has all corners at (0,0) - confirmed on real content (every one
                         # of a whole building's resolved faces, not just a rare one-off),
                         # too systematic to be a genuine "crop to one pixel" choice.
-                        # Falls back to the assigned entry's full rectangle instead of
-                        # literally sampling one pixel, using the same per-corner role
-                        # order confirmed via the live paint test (RRF_FORMAT.md): v1=
-                        # top-right, v2=top-left, v3=bottom-left, v4=bottom-right (quads).
+                        #
+                        # This does NOT mean "use the entry's full allocated rectangle" -
+                        # confirmed wrong via a live ObjEdit comparison on 88Pak43.RRF/
+                        # Normandy1.tlb (real bug report: shield/barrel faces rendered
+                        # stretched/smeared): entry 160 is allocated 32x32, but ObjEdit
+                        # showed the actual face using only a 32x16 crop - the real used
+                        # size comes from face_crop_size (materialInfo bits, see
+                        # _read_mesh_lod0), confirmed against every distinct materialInfo
+                        # value on that same part (always a clean 16px-multiple submultiple
+                        # of the entry's own size - consistent with one entry commonly
+                        # being shared by several faces, each using its own smaller
+                        # sub-tile of it, not the whole thing every time).
                         if all(c == (0, 0) for c in corners):
-                            full_rect = [(sizeX - 1, 0), (0, 0), (0, sizeY - 1), (sizeX - 1, sizeY - 1)]
+                            crop_size = part.face_crop_size[poly.index]
+                            crop_x = min(crop_size[0], sizeX) if crop_size else sizeX
+                            crop_y = min(crop_size[1], sizeY) if crop_size else sizeY
+                            full_rect = [(crop_x - 1, 0), (0, 0), (0, crop_y - 1), (crop_x - 1, crop_y - 1)]
                             corners = full_rect[:len(corners)]
                         for loop_index, (lx, ly) in zip(poly.loop_indices, corners):
                             atlas_x = posX * 16 + lx

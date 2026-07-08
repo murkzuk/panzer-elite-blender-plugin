@@ -8,6 +8,37 @@ slots when the model was last painted and saved. This is the authoritative answe
 Not every model has one — it depends on which build/version of ObjEdit last saved it.
 Older or long-unedited assets typically don't have a companion `.RRI`.
 
+## Generating a real `.RRI` for a model that doesn't have one
+
+**Confirmed real, on-demand fix for the "no reliable way to know which .TLB(s) a model
+uses" problem** - not just for models that happen to already ship with one. Traced to
+`TObjectEditForm.SaveObject1Click` in ObjEdit's own Delphi source
+(`ObjEdit\OEMainUnit.pas`): every time a model is saved from ObjEdit (File > Save /
+Save As), it automatically writes a companion `.RRI` alongside the `.RRF`, built
+straight from `LibWin.GetLibName(i)` for every one of ObjEdit's own library slots - i.e.
+it writes down exactly which real, currently-loaded libraries the editor itself is using
+at that moment, not a guess.
+
+This means the fix for "no `.RRI`, and auto-detect keeps guessing wrong" is mechanical,
+not a coding problem: **open the model in ObjEdit, load whichever library/libraries make
+it render correctly in the viewport (using ObjEdit's own "Select Theatre" library
+loading, the same mechanism the theatre picker in this plugin mirrors - see
+[TEXTURE_ID_RESOLUTION.md](TEXTURE_ID_RESOLUTION.md#theatre-picker--narrowing-auto-detect-the-way-objedit-actually-does-it)),
+then File > Save.** ObjEdit writes a real `.RRI` from its own confirmed-correct state -
+authoritative, not scored, exactly like any other genuine `.RRI` this plugin already
+prioritizes above auto-detect.
+
+**One real caveat**: `SaveObject1Click` also calls `_rrSaveGameMesh(...)`, re-writing the
+`.RRF` itself, not just the `.RRI` - **save to a copy, not the original file**, then copy
+just the resulting `.RRI` back next to the real `.RRF` if that's all you actually wanted.
+There's no way to generate *only* the `.RRI` without also triggering a full model re-save
+in this build.
+
+This does **not** help with per-face crop/UV questions (which part of a shared texture
+cell a given face uses) - the `.RRI` only ever records library assignments, never
+per-face crop data. That remains something baked into the `.RRF`'s own face records (see
+TEXTURE_ID_RESOLUTION.md), with no equivalent sidecar export.
+
 ## Layout
 
 ```
