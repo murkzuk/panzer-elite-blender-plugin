@@ -55,3 +55,34 @@ genuine `.RRI`, or by checking in-game) whenever the mod state might have change
 rather than trusting a result carried over from an earlier session under a different
 mod. Don't assume a Data_Name identifier means the same real vehicle it meant last
 time you checked.
+
+## Private-skin texture stretches on non-rectangular faces, independent of writer correctness
+
+Giving a part a private skin (`MESH_OT_pe_give_private_skin`) and painting a labeled
+checkerboard onto it to audit UV quality showed severe banding/stretching in real
+ObjEdit on `88Pak43.RRF` (Normandy_Obj) - clean in Blender's own preview, badly warped
+in OE, especially on the barrel and other tapered/non-rectangular panels.
+
+Investigated three different corner-writing approaches in `apply_private_skin()`
+(2026-07-08), tested against the user's real `PEx_105_ObjEdit.exe` at each step -
+collapsing each face to a bounding box under a fixed corner-role convention, forcing
+each face into its own small grid-tiled rectangle under that same convention, and
+finally writing each vertex's own independent (x,y) position directly (the version
+currently shipped, believed correct - see `TODO.md` for the full reasoning chain). None
+resolved the checkerboard stretching.
+
+**Why this is (probably) not fixable as a writer bug**: many real faces on this mesh
+simply aren't rectangular/square in 3D - tapered armor plates, trapezoidal panels. Any
+texture mapped across a non-rectangular polygon gets stretched toward its longest
+vertex via ordinary UV interpolation, completely independent of which corner-encoding
+convention sits underneath the data. A checkerboard is a uniquely harsh test pattern for
+this (straight grid lines make interpolation skew glaringly visible) in a way a soft
+continuous camo texture never would - real painted content might look fine even though
+the checkerboard test doesn't.
+
+**Not yet confirmed either way** - parked before testing with a more representative
+texture. If revisited: (a) retest with the part's own real borrowed camo texture (or a
+plain gradient) instead of a checkerboard, cheap and fast, would confirm or rule out
+this reframing directly; (b) if genuinely still a problem with realistic textures too,
+the real fix is re-seaming the worst non-rectangular faces in Blender so they're closer
+to true rectangles - a mesh-topology change, not a writer change.

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 13, 0),
+    "version": (0, 17, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -513,6 +513,11 @@ def plan_private_skin(bm, uv_layer, faces=None):
     {"faces": [face_index,...], "bbox": (min_u,min_v,max_u,max_v), "tiles": (w,h), "pos": (posX,posY)}
     dicts, one per island; `warnings` is the list from size_islands_to_tiles() (islands
     that had to be clamped to the format's 256x256 per-entry cap)."""
+    # Real bug caught 2026-07-08: bm.faces[fi] below needs a fresh lookup table - fine
+    # right after a plain unwrap, but any UV operator run afterward (average_islands_scale,
+    # pack_islands, etc.) can leave the previous table stale, causing an IndexError even
+    # though the face count itself hasn't changed.
+    bm.faces.ensure_lookup_table()
     faces = list(faces) if faces is not None else list(bm.faces)
     islands = detect_uv_islands(bm, uv_layer, faces)
 
@@ -540,12 +545,37 @@ def apply_private_skin(rrf_data, part_index, bm, uv_layer, plans, library, margi
     """Write side of the "private skin" workflow: given plans from plan_private_skin()
     and a TLBLibrary to add entries to (pass a fresh new_tlb_library() for a genuinely
     new, dedicated atlas), allocates one .TLB entry per island (append_tlb_entry()),
-    repoints every face in that island at it (patch_face_texture_id()), writes each
+    repoints every face in that island at it (patch_face_texture_id()), and writes each
     face's real per-vertex crop within the island's own packed rectangle
-    (patch_face_corners()) instead of the all-zero fallback, and remaps that face's
-    Blender-side UV to its new position in the packed atlas - the same forward
-    atlas_x/atlas_y <-> u/v transform build_blender_objects() uses when reading a file
-    back in, so a re-import of the result lines up with what's written here.
+    (patch_face_corners_per_vertex()) - each vertex gets its own independent (x,y)
+    position, preserving whatever real (possibly non-rectangular) UV shape the unwrap in
+    `plans` produced, rather than collapsing a face to its bounding box.
+
+    Reconsidered 2026-07-08: an earlier version of this function *did* collapse each
+    face to its bounding box and write that via patch_face_corners()'s fixed
+    v1=top-right/v2=top-left/v3=bottom-left/textureHalf=bottom-right pattern - which
+    caused real, confirmed stretching/banding in ObjEdit (organic Smart-UV-Project
+    shapes don't fit a plain rectangle). The next attempt forced every face into its own
+    small rectangular grid cell to match that fixed pattern exactly - a real
+    improvement, but still not fully resolved in a second ObjEdit test, and two
+    triangles sharing a real mesh edge (a flat panel modeled as 2 triangles, the common
+    case) could never share one clean rectangle under a *fixed*-role model regardless of
+    cell sizing, since neither triangle can ever supply a 4th corner. That pointed at
+    the fixed-role premise itself being wrong: this project's own read side, _corner_xy()
+    (sourced from the real engine's Rrdwire.c), documents the field only as "a UV pixel
+    offset within the assigned texture part" - a generic per-vertex coordinate, not a
+    named role. The "v1=top-right" pattern was only ever confirmed from one community
+    writer's own code for the one case of assigning a plain rectangle, not from the
+    engine enforcing it. This version trusts the generic-coordinate reading instead:
+    each vertex's own real position, computed from its actual relative position within
+    the island's own UV bounding box (organic shape preserved), is written directly into
+    whichever slot (v1/v2/v3/textureHalf) that vertex occupies in the face's *own*
+    record - found via each bmesh vertex's pe_vertex_index custom attribute (stamped at
+    import time), matched against the file's current v1/v2/v3/textureHalf vertex-index
+    bits (the low 16 bits, untouched by any corner/texture-id patch). Two faces sharing
+    a real mesh edge naturally agree there, since a shared vertex has exactly one real
+    position and both faces read the same value for it - no special-case pairing logic
+    needed.
 
     `margin_px` insets each island's actual content a couple pixels in from its entry's
     own edges, rather than mapping content flush to the boundary - confirmed directly by
@@ -560,6 +590,10 @@ def apply_private_skin(rrf_data, part_index, bm, uv_layer, plans, library, margi
     Mutates rrf_data and library in place (caller writes them out - see
     MESH_OT_pe_give_private_skin) and the mesh's UV layer directly. Returns the number
     of faces updated."""
+    bm.faces.ensure_lookup_table()  # same staleness risk as plan_private_skin() - see there
+    bm.verts.ensure_lookup_table()
+    vertex_index_layer = bm.verts.layers.int.get("pe_vertex_index")
+
     updated = 0
     for plan in plans:
         tiles_w, tiles_h = plan["tiles"]
@@ -581,27 +615,42 @@ def apply_private_skin(rrf_data, part_index, bm, uv_layer, plans, library, margi
         for face_index in plan["faces"]:
             patch_face_texture_id(rrf_data, part_index, 0, face_index, new_id)
             face = bm.faces[face_index]
-            xs, ys = [], []
+
+            off = _face_record_offset(rrf_data, part_index, 0, face_index)
+            v1, v2, v3, _textureOfset, textureHalf, materialInfo = struct.unpack_from("<IIIIII", rrf_data, off)
+            is_quad = bool(materialInfo & MAT_QUAD)
+            slot_of_vidx = {v1 & 0xFFFF: "v1", v2 & 0xFFFF: "v2", v3 & 0xFFFF: "v3"}
+            if is_quad:
+                slot_of_vidx[textureHalf & 0xFFFF] = "textureHalf"
+
+            corners = {}
             for loop in face.loops:
                 u, v = loop[uv_layer].uv
                 # Local pixel position within the newly allocated entry - x increases
                 # left to right same as u; y increases top to bottom, so v (which
                 # increases "up" in Blender's UV space) has to flip, matching the same
-                # convention _corner_xy()/patch_face_corners() and the importer's own
-                # atlas_y = (1-v)*ATLAS_HEIGHT already use. Mapped into the inset
-                # [usable_x0, usable_x1] range, not the entry's full [0, sizeX-1] span.
+                # convention _corner_xy()/the importer's own atlas_y = (1-v)*ATLAS_HEIGHT
+                # already use. Mapped into the inset [usable_x0, usable_x1] range, not
+                # the entry's full [0, sizeX-1] span.
                 local_x = usable_x0 + (u - min_u) / bbox_w * (usable_x1 - usable_x0)
                 local_y = usable_y0 + (max_v - v) / bbox_h * (usable_y1 - usable_y0)
                 lx = max(0, min(255, round(local_x)))
                 ly = max(0, min(255, round(local_y)))
-                xs.append(lx)
-                ys.append(ly)
 
                 atlas_x = posX * ATLAS_TILE_SIZE + lx
                 atlas_y = posY * ATLAS_TILE_SIZE + ly
                 loop[uv_layer].uv = (atlas_x / ATLAS_WIDTH, 1.0 - atlas_y / ATLAS_HEIGHT)
 
-            patch_face_corners(rrf_data, part_index, 0, face_index, min(xs), min(ys), max(xs), max(ys))
+                file_vidx = loop.vert[vertex_index_layer] if vertex_index_layer is not None else None
+                slot = slot_of_vidx.get(file_vidx)
+                if slot is not None:
+                    corners[slot] = (lx, ly)
+
+            patch_face_corners_per_vertex(
+                rrf_data, part_index, 0, face_index,
+                corners.get("v1", (0, 0)), corners.get("v2", (0, 0)), corners.get("v3", (0, 0)),
+                texture_half_xy=corners.get("textureHalf") if is_quad else None,
+            )
             updated += 1
     return updated
 
@@ -1370,6 +1419,81 @@ def patch_face_corners(data, part_index, lod, face_index, min_x, min_y, max_x, m
     struct.pack_into("<I", data, off + 8, _pack(v3, min_x, max_y))   # v3 = bottom-left
     if is_quad:
         struct.pack_into("<I", data, off + 16, _pack(textureHalf, max_x, max_y))  # bottom-right
+
+
+def patch_face_corners_per_vertex(data, part_index, lod, face_index, v1_xy, v2_xy, v3_xy, texture_half_xy=None):
+    """Writes each of a face's vertices its own independent (x,y) UV pixel offset,
+    instead of patch_face_corners()'s single shared rectangle collapsed into a fixed
+    v1=top-right/v2=top-left/v3=bottom-left/textureHalf=bottom-right pattern.
+
+    Reconsidered 2026-07-08: that fixed pattern was only ever confirmed from one
+    community writer's own code (Aldo/Brit44's, for the one case of assigning a plain
+    axis-aligned rectangle) - not from the real engine itself. This project's own
+    read-side, _corner_xy() (sourced from the real engine's Rrdwire.c), documents the
+    field only as "a UV pixel offset within the assigned texture part" - a generic
+    per-vertex coordinate with no named role. Forcing every face into the fixed-pattern
+    rectangle (as apply_private_skin() did before this) measurably improved on preserving
+    Smart UV Project's raw organic shape but still didn't fully resolve real ObjEdit
+    rendering - consistent with the fixed-pattern collapse being the wrong model, not
+    just an incomplete one. This function instead trusts each vertex's own real position
+    directly, so two faces sharing a real mesh edge (e.g. a flat panel split into two
+    triangles) naturally agree at that edge without needing any special-case pairing
+    logic - they simply both get the shared vertex's one real value.
+
+    texture_half_xy is written only if given (quads only, matching
+    patch_face_corners()'s own quad-only convention for that field). Preserves the low
+    16 bits (mesh vertex index) of each field unchanged, same as patch_face_corners()."""
+    corners = [v1_xy, v2_xy, v3_xy] + ([texture_half_xy] if texture_half_xy is not None else [])
+    if not all(0 <= v <= 255 for xy in corners for v in xy):
+        raise ValueError(f"corner values must fit in a byte (0-255): got {corners}")
+    off = _face_record_offset(data, part_index, lod, face_index)
+    v1, v2, v3, _textureOfset, textureHalf, materialInfo = struct.unpack_from("<IIIIII", data, off)
+
+    def _pack(field, xy):
+        x, y = xy
+        return (field & 0xFFFF) | (y << 24) | (x << 16)
+
+    struct.pack_into("<I", data, off + 0, _pack(v1, v1_xy))
+    struct.pack_into("<I", data, off + 4, _pack(v2, v2_xy))
+    struct.pack_into("<I", data, off + 8, _pack(v3, v3_xy))
+    if texture_half_xy is not None:
+        struct.pack_into("<I", data, off + 16, _pack(textureHalf, texture_half_xy))
+
+
+def flip_face_texture_orientation(data, part_index, lod, face_index):
+    """Replicates the real engine's own "Flip" tool exactly (Rrdwire.c
+    rrFlipObjFace()) - the mechanism behind the user-observed "right texture, wrong
+    rotation" problem on faces the original artist flipped. Confirmed from source: for
+    a quad, it swaps which VERTEX occupies the v2 vs textureHalf(v4) field - each
+    field's own UV-corner bytes (the upper 16 bits) stay exactly where they are, only
+    the vertex-index (lower 16 bits) moves between the two fields; for a triangle, it's
+    v2/v3 instead. It also negates the face's stored normal at the same time (confirmed
+    same function, same real source) - replicated here too, so the file stays exactly
+    as internally consistent as any other real, tool-saved .RRF (see
+    TEXTURE_ID_RESOLUTION.md's finding that a stored normal always matches whatever
+    vertex order is currently in the file, flipped or not - there's no separate,
+    independently-readable "was this flipped" flag anywhere, this operation is the only
+    way to toggle it, both in the real tool and here)."""
+    off = _face_record_offset(data, part_index, lod, face_index)
+    v1, v2, v3, textureOfset, textureHalf, materialInfo = struct.unpack_from("<IIIIII", data, off)
+    is_quad = bool(materialInfo & MAT_QUAD)
+
+    if is_quad:
+        v2_idx = v2 & 0xFFFF
+        v4_idx = textureHalf & 0xFFFF
+        struct.pack_into("<I", data, off + 4, (v2 & 0xFFFF0000) | v4_idx)
+        struct.pack_into("<I", data, off + 16, (textureHalf & 0xFFFF0000) | v2_idx)
+    else:
+        v2_idx = v2 & 0xFFFF
+        v3_idx = v3 & 0xFFFF
+        struct.pack_into("<I", data, off + 4, (v2 & 0xFFFF0000) | v3_idx)
+        struct.pack_into("<I", data, off + 8, (v3 & 0xFFFF0000) | v2_idx)
+
+    mesh_off = _mesh_record_offset(part_index, lod)
+    faceNormList_off, = struct.unpack_from("<I", data, mesh_off + 12)
+    norm_off = faceNormList_off + face_index * 12
+    nx, ny, nz = struct.unpack_from("<iii", data, norm_off)
+    struct.pack_into("<iii", data, norm_off, -nx, -ny, -nz)
 
 
 def _vertex_record_offset(data, part_index, lod, vertex_index):
@@ -2580,6 +2704,104 @@ class MESH_OT_pe_set_face_crop(bpy.types.Operator):
         return {"CANCELLED"}
 
 
+class MESH_OT_pe_flip_face_texture(bpy.types.Operator):
+    """Replicates the real ObjEdit's own per-face "Flip" tool - real content routinely
+    has faces the original artist flipped this way, and there's no independently-
+    readable flag anywhere in the file that says so (confirmed from the real engine
+    source, see flip_face_texture_orientation()'s docstring) - so a face reconstructed
+    from an all-zero-corner fallback (see docs/TEXTURE_ID_RESOLUTION.md) can come out
+    with the right texture content but a mirrored/rotated orientation, with no way to
+    detect that automatically at import time. This lets you fix it by hand, directly in
+    Blender, the same way you'd use ObjEdit's own Flip button - no round-trip through
+    ObjEdit needed.
+
+    Swaps the UV of two of the face's own loops to preview the effect immediately
+    (quad: loop 1 <-> loop 3; triangle: loop 1 <-> loop 2 - matching the real engine's
+    v2<->textureHalf / v2<->v3 field swap exactly), then writes the same swap plus a
+    face-normal negation directly to the .RRF, matching rrFlipObjFace() byte-for-byte
+    so the file stays exactly as valid as any real tool-saved one."""
+
+    bl_idname = "mesh.pe_flip_face_texture"
+    bl_label = "PE: Flip Face Texture Orientation"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (
+            obj is not None
+            and obj.type == "MESH"
+            and obj.mode == "EDIT"
+            and "pe_rrf_filepath" in obj
+            and "pe_part_index" in obj
+        )
+
+    def execute(self, context):
+        obj = context.active_object
+        mesh = obj.data
+        rrf_filepath = obj["pe_rrf_filepath"]
+        part_index = obj["pe_part_index"]
+
+        bm = bmesh.from_edit_mesh(mesh)
+        bm.faces.ensure_lookup_table()
+        selected_faces = [f for f in bm.faces if f.select]
+        if not selected_faces:
+            self.report({"WARNING"}, "No faces selected")
+            return {"CANCELLED"}
+
+        uv_layer = bm.loops.layers.uv.active
+        face_index_layer = bm.faces.layers.int.get("pe_face_index")
+        if uv_layer is None or face_index_layer is None:
+            self.report(
+                {"ERROR"},
+                "This mesh has no UV layer or no pe_face_index data - re-import with "
+                "this plugin version before using this operator.",
+            )
+            return {"CANCELLED"}
+
+        try:
+            rrf_data = bytearray(read_rrf_raw(rrf_filepath))
+        except OSError as e:
+            self.report({"ERROR"}, f"Could not read {rrf_filepath}: {e}")
+            return {"CANCELLED"}
+
+        flipped_count = 0
+        skipped_count = 0
+        for face in selected_faces:
+            loops = list(face.loops)
+            if len(loops) == 4:
+                a, b = 1, 3
+            elif len(loops) == 3:
+                a, b = 1, 2
+            else:
+                skipped_count += 1
+                continue
+
+            orig_face_index = face[face_index_layer]
+            try:
+                flip_face_texture_orientation(rrf_data, part_index, 0, orig_face_index)
+            except (IndexError, struct.error):
+                skipped_count += 1
+                continue
+
+            loops[a][uv_layer].uv, loops[b][uv_layer].uv = loops[b][uv_layer].uv, loops[a][uv_layer].uv
+            flipped_count += 1
+
+        if flipped_count:
+            _backup_once(rrf_filepath)
+            write_rrf_raw(rrf_filepath, bytes(rrf_data))
+            bmesh.update_edit_mesh(mesh)
+
+        msg = f"Flipped texture orientation on {flipped_count} face(s)"
+        if skipped_count:
+            msg += f", skipped {skipped_count}"
+        if flipped_count:
+            self.report({"INFO"}, msg)
+            return {"FINISHED"}
+        self.report({"WARNING"}, msg or "Nothing flipped")
+        return {"CANCELLED"}
+
+
 class MESH_OT_pe_give_private_skin(bpy.types.Operator):
     """Moves the active mesh part onto a brand-new, dedicated .TLB atlas it doesn't
     share with anything else in the game, so it can be freely repainted without any risk
@@ -2700,6 +2922,7 @@ class MESH_OT_pe_give_private_skin(bpy.types.Operator):
         new_material = _build_material(safe_name + "_private", bmp_path, tlb_filepath=tlb_path, tlb_confidence="manual", use_colorkey=False)
         mesh.materials.append(new_material)
         new_material_index = len(mesh.materials) - 1
+        bm.faces.ensure_lookup_table()
         for plan in plans:
             for face_index in plan["faces"]:
                 bm.faces[face_index].material_index = new_material_index
@@ -2966,6 +3189,7 @@ class MESH_OT_pe_delete_faces(bpy.types.Operator):
 def menu_func_detach_face(self, context):
     self.layout.operator(MESH_OT_pe_detach_face_texture.bl_idname, icon="TEXTURE")
     self.layout.operator(MESH_OT_pe_set_face_crop.bl_idname, icon="UV")
+    self.layout.operator(MESH_OT_pe_flip_face_texture.bl_idname, icon="ARROW_LEFTRIGHT")
     self.layout.operator(MESH_OT_pe_give_private_skin.bl_idname, icon="IMAGE_PLANE")
     self.layout.operator(MESH_OT_pe_write_vertex_positions.bl_idname, icon="VERTEXSEL")
     self.layout.operator(MESH_OT_pe_delete_faces.bl_idname, icon="TRASH")
@@ -2976,6 +3200,7 @@ def register():
     bpy.utils.register_class(EXPORT_OT_rrf_atlas)
     bpy.utils.register_class(MESH_OT_pe_detach_face_texture)
     bpy.utils.register_class(MESH_OT_pe_set_face_crop)
+    bpy.utils.register_class(MESH_OT_pe_flip_face_texture)
     bpy.utils.register_class(MESH_OT_pe_give_private_skin)
     bpy.utils.register_class(MESH_OT_pe_write_vertex_positions)
     bpy.utils.register_class(MESH_OT_pe_delete_faces)
@@ -2991,6 +3216,7 @@ def unregister():
     bpy.utils.unregister_class(MESH_OT_pe_delete_faces)
     bpy.utils.unregister_class(MESH_OT_pe_write_vertex_positions)
     bpy.utils.unregister_class(MESH_OT_pe_give_private_skin)
+    bpy.utils.unregister_class(MESH_OT_pe_flip_face_texture)
     bpy.utils.unregister_class(MESH_OT_pe_set_face_crop)
     bpy.utils.unregister_class(MESH_OT_pe_detach_face_texture)
     bpy.utils.unregister_class(EXPORT_OT_rrf_atlas)

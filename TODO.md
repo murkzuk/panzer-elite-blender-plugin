@@ -4,6 +4,59 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [ ] **Private-skin checker test shows severe stretching on non-rectangular faces in
+  real ObjEdit — investigated 2026-07-08, parked, likely not a writer bug at all.**
+  Gave `88Pak43.RRF` a private skin, painted a labeled checkerboard onto it to audit UV
+  quality, and tested the actual file in the user's real `PEx_105_ObjEdit.exe` (isolated
+  test copy, never touching the live file). Result: looked clean in Blender's own
+  preview, but severely banded/stretched in OE, especially on the barrel and other
+  tapered/non-rectangular panels.
+
+  Tried three approaches for `apply_private_skin()`'s corner-writing, each tested
+  against the real tool:
+  1. Collapse each face to its UV bounding box, write via the fixed
+     v1=top-right/v2=top-left/v3=bottom-left/textureHalf=bottom-right convention
+     (`patch_face_corners()`) — broke badly in OE.
+  2. Force every face into its own small grid-tiled rectangle under the same fixed-role
+     convention — measurably improved, not resolved; also logically can't ever let two
+     triangles sharing one flat panel look seamless, since neither can supply the
+     4th/BR corner under a *fixed*-role model.
+  3. **Current, shipped approach**: write each vertex's own independent (x,y) position
+     directly into whichever slot it occupies in the file (matched via `pe_vertex_index`
+     against the file's real per-slot vertex-index bits), rather than collapsing to any
+     shared box — new `patch_face_corners_per_vertex()`, used only inside
+     `apply_private_skin()` (`patch_face_corners()` itself is unchanged, still used by
+     `MESH_OT_pe_set_face_crop`, whose docstring already documents the bounding-box-only
+     behavior as intentional for that operator's simpler manual-crop case). Reasoning:
+     `_corner_xy()` (this project's own read side, sourced from the real engine's
+     `Rrdwire.c`) documents the field only as "a UV pixel offset," not a named role —
+     the fixed-role pattern was only ever confirmed from one community writer's own code
+     for one specific case, not the engine itself.
+
+  **Real-tool result after (3): still not resolved** — and the user correctly diagnosed
+  why, independent of any corner-encoding question: many real faces in this mesh simply
+  aren't rectangular/square in 3D (tapered plates, trapezoidal panels), and *any* texture
+  mapped across a non-rectangular polygon gets stretched toward its longest vertex via
+  ordinary UV interpolation, regardless of which corner-encoding convention sits
+  underneath. A checkerboard is a uniquely harsh test pattern for this (straight grid
+  lines make interpolation skew glaringly visible) in a way a soft continuous camo
+  texture never would. This reframes the whole investigation: approaches (2) and (3)
+  were likely chasing a red herring rather than a real data bug. (3) is believed correct
+  and is the version left in place, but this specific "checkerboard renders unevenly on
+  non-square faces" symptom was never actually confirmed fixed.
+
+  **Parked 2026-07-08 per explicit user request** — user's own read: "i actually think
+  it is unfixable." Two untried next steps if revisited: (a) retest with a smoother,
+  more representative texture (the part's own real borrowed camo, or a plain gradient)
+  instead of a checkerboard, to check whether the private-skin data is actually fine for
+  realistic content; (b) actually re-seam the worst non-rectangular faces (barrel,
+  tapered panels) in Blender so they're genuinely closer to rectangles - a mesh-topology
+  change, bigger scope, previously deferred for the same reason during an earlier
+  UV-island-splitting attempt the same session. See
+  [KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) for the write-up. Don't re-litigate
+  the corner-encoding question again without first ruling out (a) - that's the cheap,
+  fast check.
+
 - [x] **Fixed a real crop-size bug in the all-zero-corners fallback — confirmed and
   built 2026-07-08.** User reported `88Pak43.RRF`'s gun shield/barrel rendering
   smeared/stretched. Traced to a genuine bug (not just an approximation): the importer's
