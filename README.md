@@ -32,6 +32,11 @@ built from that documentation.
 - [`docs/PAINT_AND_EXPORT_SCOPING.md`](docs/PAINT_AND_EXPORT_SCOPING.md) — feasibility
   study for a Texture-Paint-in-Blender → repack-to-`.TLB` workflow, and what's built vs.
   still open
+- [`tools/batch_import_gui.pyw`](tools/batch_import_gui.pyw) — standalone Windows GUI for
+  batch-converting a whole folder of `.RRF` files to real-world-scaled, ground-snapped,
+  faction-painted `.blend` files in one pass (see its own header for the full real
+  citation - built after doing exactly this by hand for 154 vehicles). No install beyond
+  Blender itself; double-click to run
 - [`TODO.md`](TODO.md) — running backlog of known issues and planned work
 
 ## Status

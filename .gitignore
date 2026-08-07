@@ -1,0 +1,3 @@
+__pycache__/
+*.pyc
+tools/batch_gui_config.json
