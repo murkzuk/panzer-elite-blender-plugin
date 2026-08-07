@@ -36,7 +36,12 @@ built from that documentation.
   batch-converting a whole folder of `.RRF` files to real-world-scaled, ground-snapped,
   faction-painted `.blend` files in one pass (see its own header for the full real
   citation - built after doing exactly this by hand for 154 vehicles). No install beyond
-  Blender itself; double-click to run
+  Blender itself. Run [`tools/Run_Batch_Tool.bat`](tools/Run_Batch_Tool.bat) rather than
+  double-clicking the `.pyw` directly - on at least one real machine, Windows' own `.pyw`
+  file association routed through the Microsoft Store app-execution-alias stub instead of
+  a real Python install ("Unable to create process... The system cannot find the file
+  specified"), and the `.bat` sidesteps that by calling a real `pythonw.exe` directly by
+  full path (edit that one line if yours lives somewhere else)
 - [`TODO.md`](TODO.md) — running backlog of known issues and planned work
 
 ## Status
