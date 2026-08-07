@@ -11,6 +11,7 @@ bl_info = {
 import struct
 import os
 import shutil
+import math
 import bpy
 import bmesh
 from bpy_extras.io_utils import ImportHelper, ExportHelper
@@ -2199,6 +2200,17 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
         default=True,
     )
 
+    flip_to_positive_y_forward: BoolProperty(
+        name="Flip to +Y Forward",
+        description="Rotate the model 180 degrees around Z so its gun/hull points "
+                    "+Y instead of -Y. A raw import comes out facing -Y - confirmed "
+                    "wrong against every real working vehicle already in this project "
+                    "(KV-1 and Pz4H's own already-correct models both point +Y, "
+                    "cross-checked independently). Turn off only if you specifically "
+                    "want PE's own raw facing convention preserved",
+        default=True,
+    )
+
     def execute(self, context):
         try:
             parts = read_rrf(self.filepath)
@@ -2327,6 +2339,20 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
                 obj.location = (obj.location.x * PE_TO_METERS_SCALE,
                                  obj.location.y * PE_TO_METERS_SCALE,
                                  obj.location.z * PE_TO_METERS_SCALE)
+
+        # Real facing fix (2026-08-07) - a raw import comes out with its gun/hull
+        # pointing -Y, confirmed wrong against every real working vehicle already in
+        # this project (KV-1's Kv176.glb and Pz4H's Pzr4h.glb both independently
+        # checked - both point +Y). 180 degrees around Z transforms position
+        # (x, y, z) -> (-x, -y, z) as well as rotating the object itself - same
+        # "every independent root implicitly shares the world origin" reasoning as
+        # the scale fix above, so this stays correct even for a model with more than
+        # one true root.
+        if self.flip_to_positive_y_forward:
+            for obj in root_objects:
+                obj.rotation_euler.z += math.pi
+                obj.location.x = -obj.location.x
+                obj.location.y = -obj.location.y
 
         if self.snap_to_ground:
             # Real bug found live: matrix_world isn't recomputed synchronously just
