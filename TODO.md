@@ -4,6 +4,51 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [ ] **Wheel-cylinder replacement only reaches ~39% of the real roster - most
+  vehicles' wheel objects use naming/structure this pass doesn't handle yet.**
+  Logged 2026-08-07, right after shipping the wheel-cylinder + track-grey batch
+  pass (`tools/_worker_convert.py`'s `replace_with_cylinder()`, 597 cylinders
+  created across CustomB's 154 vehicles, real and working - see that commit for
+  the full citation). User caught it live: "marder2 amoung many other 2d wheels
+  still" - real, systematic gap, not a one-off.
+
+  Surveyed all 154 converted `.blend` files directly (not assumed): only
+  **60/154 (39%)** have any mesh object whose name matches the current filter
+  (`wheel`/`roller`/`cog`, case-insensitive substring). The other **94/154
+  (61%)** use naming/structure this pass never even considers:
+  - **German naming** - `Raeder`/`Räder` ("wheels"), `Rad`/`RadL`/`RadR`/`RVRad`
+    ("wheel") - confirmed on Marder2, 76net, ATGun57, ATRgun45/57/76, ATgun76,
+    Ba20, Bt7-0, CharB (real sample list, not exhaustive - a full re-survey
+    should catalogue every distinct naming convention actually present, not
+    just what turned up in one 15-file sample).
+  - **Whole-suspension blobs with nothing separable at all** - Churchill3 and
+    Cromwell both use one `SUSPENSION` object (no individual wheel geometry
+    to extract in the first place) - these may need a completely different
+    approach (or may not be fixable this way at all).
+
+  **Real reason this isn't just "add German words to the name filter"**: most
+  `Raeder`-style objects are very likely ALSO compound multi-wheel meshes
+  (same real problem already found and correctly left alone for `idler`
+  (Tiger1) and `Boggies` (KV-2) - Marder2's own `Raeder` is 88 verts, plausible
+  for several wheels merged into one object, not one disc). The circularity
+  safety check (`replace_with_cylinder()`'s own real fix, see that commit)
+  would likely just correctly skip most of these anyway even with wider name
+  matching - the real blocker is building genuine connected-component
+  splitting for a compound multi-wheel mesh, not just recognizing more names.
+  That's a real, separate, bigger task - not attempted here, logged instead of
+  chased further this session per explicit direction ("log it as a follow-up,
+  don't chase it now").
+
+  **Real next steps when this gets picked up**: (1) full re-survey of all 154
+  files' real object names (not the 15-file sample above) to catalogue every
+  distinct wheel-naming convention actually present, (2) design a real
+  connected-component splitter (likely: cluster a compound wheel mesh's own
+  vertices/faces by spatial proximity/normal-consistency into separate wheel-
+  sized islands, THEN run the existing per-wheel circularity+cylinder logic on
+  each island) rather than treating this as a simple name-matching gap.
+
+---
+
 - [x] **Batch RRF-import correctness: scale, ground-snap, +Y-forward - DONE
   2026-08-07.** Found while batch-converting CustomB's real vehicle roster (154
   files) for Cogs of War. Three real, permanent fixes now baked into
