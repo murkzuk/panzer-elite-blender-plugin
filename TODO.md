@@ -4,6 +4,56 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [x] **Batch RRF-import correctness: scale, ground-snap, +Y-forward - DONE
+  2026-08-07.** Found while batch-converting CustomB's real vehicle roster (154
+  files) for Cogs of War. Three real, permanent fixes now baked into
+  `io_import_rrf.py` itself (all default-on import options, not just external
+  post-processing):
+  1. `apply_real_world_scale` - a raw import comes out ~6-9x too big on every
+     axis. `PE_TO_METERS_SCALE=0.14` derived empirically from raw bboxes vs.
+     real historical vehicle dimensions (KV-1, Pz4H), not against this
+     project's own older glb references (which disagreed with each other more
+     than the real data did).
+  2. `snap_to_ground` - a fresh import's pivot can sit well off the model's own
+     ground contact point (confirmed: a real KV-2 came out 0.59m too high).
+     Real Blender gotcha found along the way: `matrix_world` isn't recomputed
+     synchronously right after setting `.location`/`.scale` - needs an
+     explicit `context.view_layer.update()` before reading it for the
+     ground-snap calculation, or the offset comes out from stale data.
+  3. `flip_to_positive_y_forward` - a raw import faces -Y; every real working
+     vehicle already in the project (KV-1, Pz4H) faces +Y. 180° around Z.
+  All three: only root-level objects need touching (children inherit via
+  Blender's transform hierarchy) - but scale/flip both also need `.location`
+  itself scaled/rotated, not just `.scale`/`.rotation_euler`, since some real
+  imports have many independent root objects (e.g. a real KV2-0 import has 12
+  - AAMG/Comander/radio/Turret_MG1/etc, small detail parts each imported as
+  their own unparented object at real raw-unit coordinates) that would
+  otherwise render correctly-sized/oriented but scattered away from the hull.
+  New `tools/batch_import_gui.pyw` - standalone Windows GUI wrapping the whole
+  pipeline (import with all three fixes + optional Smart UV + faction-paint
+  pass) for batch work on a whole folder at once, no Blender UI clicking
+  needed. Runs each file as its own fresh Blender subprocess with a hard
+  per-file timeout, not one long-running loop - real, load-bearing design:
+  `Psw232.RRF` was found to hang `bmesh.ops.recalc_face_normals()`
+  indefinitely on degenerate geometry in one part (8 of 104 faces on
+  `turretL` have a repeated vertex index) during this same real batch work,
+  costing 4+ hours before diagnosis; that specific bug is fixed (see
+  `_recalculate_normals()`'s own header), but per-file isolation stays right
+  for whatever the next unknown edge case turns out to be.
+  **Result**: CustomB's real 154-vehicle roster (basically the whole Ostpak
+  combat/logistics vehicle set) now converts 154/154 clean, real-world
+  scaled, ground-snapped, correctly-facing, faction-painted, in one pass.
+  **Known separate issue, not yet tackled**: many real wheel/cog/idler parts
+  are genuinely flat 2D discs, not 3D cylinders (confirmed: Tiger1's own
+  `wheel_0`-`wheel_15` measure 0.099m thick vs. 0.717m diameter, ~1:7 ratio) -
+  a real, common 1999-era engine shortcut, not an import bug. Real follow-up
+  candidate once picked back up.
+  **Next real target**: the Desert theatre folder - same tool, `faction_map.json`
+  will need new entries for whatever's in there (the GUI's own "Edit
+  Unclassified" dialog handles this without hand-editing the JSON).
+
+---
+
 - [ ] **Private-skin checker test shows severe stretching on non-rectangular faces in
   real ObjEdit — investigated 2026-07-08, parked, likely not a writer bug at all.**
   Gave `88Pak43.RRF` a private skin, painted a labeled checkerboard onto it to audit UV
