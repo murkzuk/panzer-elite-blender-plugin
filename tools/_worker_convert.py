@@ -57,9 +57,10 @@ def get_or_make_shared_material(basecolor_png_path):
 
 def main():
     argv = sys.argv[sys.argv.index("--") + 1:]
-    src_path, out_path, apply_scale, snap_ground, do_uv_paint, faction, basecolor_png = argv[:7]
+    src_path, out_path, apply_scale, snap_ground, flip_forward, do_uv_paint, faction, basecolor_png = argv[:8]
     apply_scale = apply_scale == "1"
     snap_ground = snap_ground == "1"
+    flip_forward = flip_forward == "1"
     do_uv_paint = do_uv_paint == "1"
 
     bpy.ops.object.select_all(action="SELECT")
@@ -70,6 +71,7 @@ def main():
         use_rri=True,
         apply_real_world_scale=apply_scale,
         snap_to_ground=snap_ground,
+        flip_to_positive_y_forward=flip_forward,
     )
     if result != {"FINISHED"}:
         raise RuntimeError(f"importer returned {result}, not FINISHED")

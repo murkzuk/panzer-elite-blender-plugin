@@ -45,6 +45,7 @@ DEFAULT_CONFIG = {
     "basecolor_png": r"K:\Cogs of War\models\Kv176_BaseColor_WW2.png",
     "apply_scale": True,
     "snap_ground": True,
+    "flip_forward": True,
     "do_uv_paint": True,
     "timeout_s": 45,
 }
@@ -106,6 +107,7 @@ class BatchApp(tk.Tk):
 
         self.apply_scale_var = tk.BooleanVar(value=self.config_data["apply_scale"])
         self.snap_ground_var = tk.BooleanVar(value=self.config_data["snap_ground"])
+        self.flip_forward_var = tk.BooleanVar(value=self.config_data["flip_forward"])
         self.do_uv_paint_var = tk.BooleanVar(value=self.config_data["do_uv_paint"])
         self.timeout_var = tk.IntVar(value=self.config_data["timeout_s"])
 
@@ -113,6 +115,7 @@ class BatchApp(tk.Tk):
         row.pack(fill="x", padx=4, pady=2)
         ttk.Checkbutton(row, text="Apply real-world scale (0.14)", variable=self.apply_scale_var).pack(side="left", padx=6)
         ttk.Checkbutton(row, text="Snap to ground (Z=0)", variable=self.snap_ground_var).pack(side="left", padx=6)
+        ttk.Checkbutton(row, text="Flip to +Y forward", variable=self.flip_forward_var).pack(side="left", padx=6)
         ttk.Checkbutton(row, text="Smart UV + faction paint", variable=self.do_uv_paint_var).pack(side="left", padx=6)
         ttk.Label(row, text="Per-file timeout (s):").pack(side="left", padx=(20, 4))
         ttk.Spinbox(row, from_=10, to=600, textvariable=self.timeout_var, width=6).pack(side="left")
@@ -246,6 +249,7 @@ class BatchApp(tk.Tk):
             "basecolor_png": self.basecolor_var.get(),
             "apply_scale": self.apply_scale_var.get(),
             "snap_ground": self.snap_ground_var.get(),
+            "flip_forward": self.flip_forward_var.get(),
             "do_uv_paint": self.do_uv_paint_var.get(),
             "timeout_s": self.timeout_var.get(),
         })
@@ -291,6 +295,7 @@ class BatchApp(tk.Tk):
         timeout_s = self.timeout_var.get()
         apply_scale = "1" if self.apply_scale_var.get() else "0"
         snap_ground = "1" if self.snap_ground_var.get() else "0"
+        flip_forward = "1" if self.flip_forward_var.get() else "0"
         do_uv_paint = "1" if self.do_uv_paint_var.get() else "0"
         basecolor_png = self.basecolor_var.get()
         log_path = os.path.join(out, "_batch_gui_log.txt")
@@ -308,7 +313,7 @@ class BatchApp(tk.Tk):
 
             cmd = [
                 blender, "--background", "--python", str(WORKER_SCRIPT), "--",
-                src_path, out_path, apply_scale, snap_ground, do_uv_paint, faction, basecolor_png,
+                src_path, out_path, apply_scale, snap_ground, flip_forward, do_uv_paint, faction, basecolor_png,
             ]
             t0 = time.time()
             try:
