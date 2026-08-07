@@ -15,7 +15,7 @@ import bpy
 import bmesh
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 from bpy.props import StringProperty, BoolProperty, EnumProperty, FloatVectorProperty
-from mathutils import Matrix
+from mathutils import Matrix, Vector
 
 ATLAS_EXPECTED_SIZE = (256, 4096)
 
@@ -72,6 +72,20 @@ MAX_LIBS = 32
 # ImageLibUnit.pas: 16 tiles wide x 256 tiles tall = 256x4096).
 ATLAS_WIDTH = 256
 ATLAS_HEIGHT = 4096
+
+# Real real-world-meter scale correction (2026-08-07) - PE's own rrCoord fixed-point
+# values are NOT real-world meters (a raw import comes out ~6-9x too big on every
+# axis), and this project has no other documented conversion. Derived empirically,
+# not guessed: raw RRF import bounding boxes compared against REAL independently-
+# known historical vehicle dimensions (KV-1: 3.25/6.75/2.71m; Pz4H hull: 2.88/5.92/
+# 2.68m - not against this project's own older, separately-converted glb references,
+# which turned out to disagree with each other by more than the real historical data
+# did). Six measurements (2 vehicles x 3 axes) gave 0.114-0.170, converging around
+# ~0.14 real-meters-per-raw-unit - close enough across two unrelated vehicles and
+# axes to trust as a real, if not perfectly precise (~10-15% per-vehicle variance
+# should be expected), universal conversion factor for this format, not a vehicle-
+# specific tuning value.
+PE_TO_METERS_SCALE = 0.14
 
 # From Rrattrib.h - only the common/recognizable ones, for a readable custom property.
 OBJ_TYPE_NAMES = {
@@ -2162,6 +2176,29 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
         max=1.0,
     )
 
+    apply_real_world_scale: BoolProperty(
+        name="Apply Real-World Scale",
+        description="Scale the imported model by the real PE-units-to-meters "
+                    "conversion factor (see PE_TO_METERS_SCALE's own header for the "
+                    "real derivation) - without this, a raw import comes out roughly "
+                    "6-9x too big on every axis compared to real-world/Godot scale. "
+                    "Turn off only if you specifically want the model in PE's own raw "
+                    "internal units",
+        default=True,
+    )
+
+    snap_to_ground: BoolProperty(
+        name="Snap to Ground (Z=0)",
+        description="Shift the whole model up/down so its own lowest point sits "
+                    "exactly at Z=0, matching the convention every other real vehicle "
+                    "in this project already uses. Without this, a fresh import's "
+                    "pivot can sit well off the model's own ground contact point "
+                    "(confirmed on a real KV-2 import: 0.59m too high) - whatever "
+                    "raw pivot the original PE artist happened to author it with, not "
+                    "necessarily ground level",
+        default=True,
+    )
+
     def execute(self, context):
         try:
             parts = read_rrf(self.filepath)
@@ -2263,6 +2300,50 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
             parts, collection, root_name, slot_sources, rrf_filepath=self.filepath, tlb_confidence=tlb_confidence,
             use_colorkey=self.use_colorkey, colorkey_color=tuple(self.colorkey_color),
         )
+
+        # Real scale + ground-snap fix (2026-08-07) - see apply_real_world_scale's/
+        # snap_to_ground's own property headers and PE_TO_METERS_SCALE's own header
+        # for the full real derivation/citations. Only root-level objects (parent is
+        # None) need touching - Blender's transform hierarchy means every child
+        # inherits its parent's world scale/position automatically, and glTF/Godot
+        # both handle nested transforms natively (no need to bake anything into
+        # individual child objects or their mesh data).
+        #
+        # Real bug found live and fixed here (not just in the scale value): some real
+        # imports have MANY independent root objects, not one hull root with a clean
+        # hierarchy - e.g. a real KV2-0 import has 12 roots (AAMG/Comander/radio/
+        # Turret_MG1/etc, small detail parts each imported as their own unparented
+        # object, still positioned at real raw-unit coordinates relative to the whole
+        # vehicle - confirmed live: one sat 17 raw units from the hull root). Scaling
+        # only .scale shrinks each part's OWN geometry correctly but leaves .location
+        # untouched, so the part would render correctly-SIZED but still scattered far
+        # from the hull instead of attached to it. Scaling .location by the same
+        # factor too (every independent root implicitly shares the world origin as
+        # their common pivot) shrinks the whole assembly together correctly.
+        root_objects = [o for o in objects if o.parent is None]
+        if self.apply_real_world_scale:
+            for obj in root_objects:
+                obj.scale = (PE_TO_METERS_SCALE, PE_TO_METERS_SCALE, PE_TO_METERS_SCALE)
+                obj.location = (obj.location.x * PE_TO_METERS_SCALE,
+                                 obj.location.y * PE_TO_METERS_SCALE,
+                                 obj.location.z * PE_TO_METERS_SCALE)
+
+        if self.snap_to_ground:
+            # Real bug found live: matrix_world isn't recomputed synchronously just
+            # from setting .location/.scale above - reading it immediately afterward
+            # (without this) returns the STALE pre-scale/pre-relocate transform, so
+            # the ground-snap offset gets computed from the wrong (much larger, raw-
+            # unit) bounding box - confirmed live: a real KV2 import came out with
+            # lowest_z=3.5 instead of ~0 without this update.
+            context.view_layer.update()
+            corners = []
+            for obj in objects:
+                if obj.type == "MESH":
+                    corners.extend(obj.matrix_world @ Vector(c) for c in obj.bound_box)
+            if corners:
+                lowest_z = min(c.z for c in corners)
+                for obj in root_objects:
+                    obj.location.z -= lowest_z
 
         msg = f"Imported {len(parts)} part(s) from {root_name}.rrf" + detect_msg
         if slot_sources is not None:
