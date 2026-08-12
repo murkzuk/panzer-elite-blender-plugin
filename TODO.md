@@ -4,6 +4,32 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [ ] **"Add faces" scoped 2026-08-12 - see
+  [docs/ADD_FACES_SCOPING.md](docs/ADD_FACES_SCOPING.md).** The last real gap between
+  the current surgical editors and an actual `.RRF` exporter. Two findings from the
+  scoping pass worth having here directly:
+
+  1. **`maxAllVertex`/`maxVertex` are never maintained by
+     `rebuild_part_mesh_region()`** - a real defect, not just a future one. Measured:
+     `maxAllVertex` equals the *sum* of every part's LOD0 `vertexCount` in 7,260 of
+     7,418 real files (0 match the largest single part; the other 158 sit slightly
+     *above* the sum, never below), so it is an allocation bound. Exercising the real
+     function on `PantherG.RRF` (453 -> 450 verts) left `maxVertex` reading 453 and
+     `maxAllVertex` 5488 against a real sum of 5485. Harmless for deletion (both end up
+     too large - the safe direction), but adding vertices without fixing this leaves
+     both fields *below* the real counts. Worth fixing on its own even if nothing else
+     here gets built.
+  2. **The geometry writer is NOT broken by the 2026-08-07 import transforms.** Scale,
+     the 180-degree flip and ground-snap are applied to the object transform, not mesh
+     data, so `vert.co` stays raw and needs no inverse. Proven, not reasoned: importing
+     `PantherG.RRF` with all three options on and writing all 31 parts' positions
+     straight back produced a byte-identical file.
+
+  Recommended first step is the capacity-field fix, then an `add faces` operator that
+  inherits its texture assignment from an edge-adjacent face (reusing
+  `patch_face_corners_per_vertex()`), refusing clearly when there is no textured
+  neighbour rather than inventing one.
+
 - [ ] **Wheel-cylinder replacement only reaches ~39% of the real roster - most
   vehicles' wheel objects use naming/structure this pass doesn't handle yet.**
   Logged 2026-08-07, right after shipping the wheel-cylinder + track-grey batch
