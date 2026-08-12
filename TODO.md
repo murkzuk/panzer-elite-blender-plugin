@@ -55,10 +55,9 @@ Running list of things flagged during work sessions, not yet done. Newest first.
   `io_import_rrf.py` itself (all default-on import options, not just external
   post-processing):
   1. `apply_real_world_scale` - a raw import comes out ~6-9x too big on every
-     axis. `PE_TO_METERS_SCALE=0.14` derived empirically from raw bboxes vs.
-     real historical vehicle dimensions (KV-1, Pz4H), not against this
-     project's own older glb references (which disagreed with each other more
-     than the real data did).
+     axis. **`PE_TO_METERS_SCALE` corrected to 0.15625 on 2026-08-12** (was an
+     empirically-fitted 0.14 - see the entry at the top of this file for the
+     real engine-source citation that replaced it).
   2. `snap_to_ground` - a fresh import's pivot can sit well off the model's own
      ground contact point (confirmed: a real KV-2 came out 0.59m too high).
      Real Blender gotcha found along the way: `matrix_world` isn't recomputed

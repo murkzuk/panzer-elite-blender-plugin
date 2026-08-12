@@ -115,7 +115,7 @@ class BatchApp(tk.Tk):
 
         row = ttk.Frame(options)
         row.pack(fill="x", padx=4, pady=2)
-        ttk.Checkbutton(row, text="Apply real-world scale (0.14)", variable=self.apply_scale_var).pack(side="left", padx=6)
+        ttk.Checkbutton(row, text="Apply real-world scale (0.15625)", variable=self.apply_scale_var).pack(side="left", padx=6)
         ttk.Checkbutton(row, text="Snap to ground (Z=0)", variable=self.snap_ground_var).pack(side="left", padx=6)
         ttk.Checkbutton(row, text="Flip to +Y forward", variable=self.flip_forward_var).pack(side="left", padx=6)
         ttk.Checkbutton(row, text="Wheel cylinders + track grey", variable=self.wheel_cylinders_var).pack(side="left", padx=6)

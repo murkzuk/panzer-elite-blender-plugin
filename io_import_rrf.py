@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 17, 0),
+    "version": (0, 18, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -74,19 +74,29 @@ MAX_LIBS = 32
 ATLAS_WIDTH = 256
 ATLAS_HEIGHT = 4096
 
-# Real real-world-meter scale correction (2026-08-07) - PE's own rrCoord fixed-point
-# values are NOT real-world meters (a raw import comes out ~6-9x too big on every
-# axis), and this project has no other documented conversion. Derived empirically,
-# not guessed: raw RRF import bounding boxes compared against REAL independently-
-# known historical vehicle dimensions (KV-1: 3.25/6.75/2.71m; Pz4H hull: 2.88/5.92/
-# 2.68m - not against this project's own older, separately-converted glb references,
-# which turned out to disagree with each other by more than the real historical data
-# did). Six measurements (2 vehicles x 3 axes) gave 0.114-0.170, converging around
-# ~0.14 real-meters-per-raw-unit - close enough across two unrelated vehicles and
-# axes to trust as a real, if not perfectly precise (~10-15% per-vehicle variance
-# should be expected), universal conversion factor for this format, not a vehicle-
-# specific tuning value.
-PE_TO_METERS_SCALE = 0.14
+# Real-world-meter conversion. PE's own rrCoord fixed-point values are NOT meters (a
+# raw import comes out ~6-9x too big on every axis).
+#
+# CORRECTED 2026-08-12 from the real engine source, replacing an earlier empirically-
+# fitted 0.14. `RRF object hex/object.c` (Alan Barber's own PE-X collision-box code)
+# states it outright, in a comment on the pad it applies to a landscape object's box:
+#
+#     // 0x21800/0x400000 = .327148 meters in RRF vertex position
+#
+# Decoded: 0x21800 = 137216 raw, which in this format's 16.16 fixed point (RRF_FORMAT.md)
+# is 137216/65536 = 2.09375 units. The quoted 0.3271484375 m / 2.09375 units =
+# 0.15625 m per unit exactly - equivalently meters = raw * 10 / 0x400000, i.e. a clean
+# 64 units = 10 meters. The comment's own metre figure reproduces to the last digit, so
+# this is an exact engine constant, not a fit.
+#
+# The previous 0.14 came from fitting whole-model bounding boxes to known historical
+# vehicle dimensions. That method is biased low: a whole-model box includes gun
+# overhang, Schuerzen side skirts and open hatches, so the raw box is inflated relative
+# to the hull figure it was being matched against, which drags the fitted scale down -
+# which is exactly the ~10% shortfall seen (0.14 / 0.15625 = 0.896). Re-measured after
+# this correction: a real KV-1 (Kv176-0.rrf) comes out 3.23m wide / 2.77m high against
+# a real 3.32m / 2.71m (-2.7% / +2.3%), versus -12.8% / -8.4% under 0.14.
+PE_TO_METERS_SCALE = 0.15625
 
 # From Rrattrib.h - only the common/recognizable ones, for a readable custom property.
 OBJ_TYPE_NAMES = {
@@ -2180,9 +2190,10 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
     apply_real_world_scale: BoolProperty(
         name="Apply Real-World Scale",
         description="Scale the imported model by the real PE-units-to-meters "
-                    "conversion factor (see PE_TO_METERS_SCALE's own header for the "
-                    "real derivation) - without this, a raw import comes out roughly "
-                    "6-9x too big on every axis compared to real-world/Godot scale. "
+                    "conversion factor (0.15625, i.e. 64 PE units = 10 metres - taken "
+                    "straight from the real engine source, see PE_TO_METERS_SCALE's "
+                    "own header) - without this, a raw import comes out roughly 6-9x "
+                    "too big on every axis compared to real-world/Godot scale. "
                     "Turn off only if you specifically want the model in PE's own raw "
                     "internal units",
         default=True,
