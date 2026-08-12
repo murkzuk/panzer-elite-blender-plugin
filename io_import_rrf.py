@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 25, 0),
+    "version": (0, 26, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -2707,6 +2707,105 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
         return {"FINISHED"}
 
 
+class EXPORT_OT_rrf_model(bpy.types.Operator, ExportHelper):
+    """Exports the selected Panzer Elite part(s) to a .RRF file.
+
+    This writes to a NEW file, leaving the model you imported from untouched - it copies
+    that source .RRF to the chosen path first, then applies each selected object's
+    current Blender mesh into its own part. Geometry added or deleted in Blender is
+    included (see MESH_OT_pe_write_mesh for exactly what is carried forward and what is
+    built fresh).
+
+    Real limitation, stated rather than hidden: this is not "save any Blender object as a
+    .RRF". Every exported object must have been imported from a .RRF by this add-on -
+    that source file supplies the part hierarchy, pivots, gameplay attributes and texture
+    assignments that a mesh alone does not carry. Authoring a model from nothing is
+    scoped in docs/AUTHORING_SCOPING.md and is not built. All selected objects must come
+    from the SAME source file, since a .RRF holds one model's whole part hierarchy.
+
+    The matching .TLB is not written here: an exported model keeps referring to whichever
+    texture library it already used. To give a part its own paintable library, run
+    "PE: Give This Part a Private Skin" before exporting."""
+
+    bl_idname = "export_scene.pe_rrf_model"
+    bl_label = "Export Panzer Elite Model (.rrf)"
+    bl_options = {"REGISTER", "UNDO"}
+    filename_ext = ".rrf"
+    filter_glob: StringProperty(default="*.rrf;*.RRF", options={"HIDDEN"})
+
+    selected_only: BoolProperty(
+        name="Selected Objects Only",
+        description="Export only selected parts. Turn off to export every part imported "
+                    "from the same source file, whether selected or not - usually what "
+                    "you want, since a .RRF holds the whole vehicle",
+        default=False,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return any(o.type == "MESH" and "pe_rrf_filepath" in o for o in context.scene.objects)
+
+    def execute(self, context):
+        candidates = [o for o in context.scene.objects
+                      if o.type == "MESH" and "pe_rrf_filepath" in o and "pe_part_index" in o]
+        if self.selected_only:
+            candidates = [o for o in candidates if o.select_get()]
+        if not candidates:
+            self.report({"ERROR"}, "No imported Panzer Elite parts to export")
+            return {"CANCELLED"}
+
+        sources = {o["pe_rrf_filepath"] for o in candidates}
+        if len(sources) > 1:
+            self.report({"ERROR"},
+                        "Selected parts come from %d different .RRF files (%s) - a .RRF holds one "
+                        "model's whole hierarchy, so they cannot be written to one file"
+                        % (len(sources), ", ".join(sorted(os.path.basename(p) for p in sources))))
+            return {"CANCELLED"}
+        source = sources.pop()
+
+        if os.path.abspath(source) == os.path.abspath(self.filepath):
+            self.report({"ERROR"}, "Refusing to overwrite the source model - choose a different "
+                                   "filename, or use the Edit Mode 'PE: Write Mesh to .RRF' "
+                                   "operator to edit it in place")
+            return {"CANCELLED"}
+
+        try:
+            rrf_data = read_rrf_raw(source)
+        except OSError as e:
+            self.report({"ERROR"}, "Could not read the source model %s: %s" % (source, e))
+            return {"CANCELLED"}
+
+        written, total_added, total_removed = 0, 0, 0
+        for obj in sorted(candidates, key=lambda o: o["pe_part_index"]):
+            bm = bmesh.new()
+            try:
+                bm.from_mesh(obj.data)
+                bm.faces.ensure_lookup_table()
+                bm.verts.ensure_lookup_table()
+                rrf_data, stats = write_object_mesh_into_rrf(
+                    rrf_data, obj, bm, obj["pe_part_index"])
+            except (ValueError, struct.error) as e:
+                self.report({"ERROR"}, str(e) + " - nothing written")
+                return {"CANCELLED"}
+            finally:
+                bm.free()
+            written += 1
+            total_added += stats["added"]
+            total_removed += stats["removed"]
+
+        try:
+            write_rrf_raw(self.filepath, rrf_data)
+        except OSError as e:
+            self.report({"ERROR"}, "Could not write %s: %s" % (self.filepath, e))
+            return {"CANCELLED"}
+
+        self.report({"INFO"},
+                    "Exported %d part(s) (+%d face(s) added, -%d deleted) to %s - source model "
+                    "untouched" % (written, total_added, total_removed,
+                                   os.path.basename(self.filepath)))
+        return {"FINISHED"}
+
+
 def menu_func_import(self, context):
     self.layout.operator(IMPORT_OT_rrf.bl_idname, text="Panzer Elite Model (.rrf)")
 
@@ -2822,6 +2921,7 @@ class EXPORT_OT_rrf_atlas(bpy.types.Operator, ExportHelper):
 
 def menu_func_export(self, context):
     self.layout.operator(EXPORT_OT_rrf_atlas.bl_idname, text="Panzer Elite Texture Atlas (.bmp)")
+    self.layout.operator(EXPORT_OT_rrf_model.bl_idname, text="Panzer Elite Model (.rrf)")
 
 
 def _backup_once(filepath):
@@ -3366,6 +3466,134 @@ class MESH_OT_pe_give_private_skin(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def write_object_mesh_into_rrf(rrf_data, obj, bm, part_index):
+    """Applies one Blender object's current mesh to `part_index` of an in-memory .RRF,
+    returning (new_rrf_data, stats). Shared by the Edit Mode operator
+    (MESH_OT_pe_write_mesh) and the File > Export path (EXPORT_OT_rrf_model) so both
+    behave identically - the only difference between them is where the bmesh comes from
+    and which file the result is written to.
+
+    Raises ValueError with a user-facing message rather than writing anything
+    questionable. See MESH_OT_pe_write_mesh's docstring for the full behaviour: original
+    elements keep their real file data, new faces inherit a real edge-neighbour's texture
+    assignment, and the draw order is derived from the part's own sortList."""
+    f_idx = bm.faces.layers.int.get("pe_face_index")
+    v_idx = bm.verts.layers.int.get("pe_vertex_index")
+    f_orig = bm.faces.layers.int.get("pe_face_orig")
+    v_orig = bm.verts.layers.int.get("pe_vertex_orig")
+    if f_idx is None or v_idx is None or f_orig is None or v_orig is None:
+        raise ValueError("'%s' predates the pe_face_orig/pe_vertex_orig markers - re-import it "
+                         "so new geometry can be told from original geometry" % obj.name)
+    if not bm.faces:
+        raise ValueError("'%s' has no faces - refusing to write an empty part" % obj.name)
+    ngons = [f for f in bm.faces if len(f.verts) not in (3, 4)]
+    if ngons:
+        raise ValueError("'%s' has %d n-gon(s); this format stores only triangles and quads - "
+                         "triangulate first" % (obj.name, len(ngons)))
+    if len(bm.verts) > 0xFFFF:
+        raise ValueError("'%s' has %d vertices, over this format's 16-bit per-face vertex "
+                         "indexing limit (65535)" % (obj.name, len(bm.verts)))
+
+    mesh_off = _mesh_record_offset(part_index, 0)
+    (_mt, orig_face_count, _fl, old_faceNormList_off, orig_vertex_count,
+     _vl, old_vertexNormList_off, _sl, old_attribVList_off) = struct.unpack_from(
+        "<IIIIIIIII", rrf_data, mesh_off)
+
+    is_root = part_index == 0
+    pivot = obj.get("pe_pivot", (0.0, 0.0, 0.0))
+
+    new_vertices, new_attrib_v, new_vertex_normals = [], [], []
+    vert_slot = {}
+    for i, v in enumerate(bm.verts):
+        vert_slot[v.index] = i
+        lx, ly, lz = v.co
+        if is_root:
+            new_vertices.append((lx + pivot[0], ly + pivot[1], lz + pivot[2]))
+        else:
+            new_vertices.append((lx, ly, lz))
+        ov = v[v_idx]
+        if v[v_orig] and 0 <= ov < orig_vertex_count:
+            val, = struct.unpack_from("<H", rrf_data, old_attribVList_off + ov * 2)
+            new_attrib_v.append(val)
+            new_vertex_normals.append(read_stored_normal(rrf_data, old_vertexNormList_off, ov))
+        else:
+            new_attrib_v.append(0)
+            new_vertex_normals.append(None)
+
+    new_faces, new_tex, new_corners, new_mats = [], [], [], []
+    new_records, new_face_normals = [], []
+    face_orig_to_new, pending_neighbour = {}, {}
+    orphan_count = 0
+    for f in bm.faces:
+        slot = len(new_faces)
+        new_faces.append(tuple(vert_slot[v.index] for v in f.verts))
+        of = f[f_idx]
+        if f[f_orig] and 0 <= of < orig_face_count:
+            new_records.append(read_face_record(rrf_data, part_index, 0, of))
+            new_tex.append(read_face_texture_id(rrf_data, part_index, 0, of) or 0)
+            new_corners.append(read_face_corners(rrf_data, part_index, 0, of))
+            new_mats.append(read_face_material_info(rrf_data, part_index, 0, of))
+            new_face_normals.append(read_stored_normal(rrf_data, old_faceNormList_off, of))
+            face_orig_to_new[of] = slot
+        else:
+            donor = None
+            for e in f.edges:
+                for nf in e.link_faces:
+                    if nf is not f and nf[f_orig] and 0 <= nf[f_idx] < orig_face_count:
+                        donor = nf
+                        break
+                if donor is not None:
+                    break
+            if donor is None:
+                orphan_count += 1
+                new_records.append(None)
+                new_tex.append(0)
+                new_corners.append([(0, 0)] * 4)
+                new_mats.append(None)
+                new_face_normals.append(None)
+            else:
+                d = donor[f_idx]
+                new_records.append(None)
+                new_tex.append(read_face_texture_id(rrf_data, part_index, 0, d) or 0)
+                new_corners.append(read_face_corners(rrf_data, part_index, 0, d))
+                new_mats.append(read_face_material_info(rrf_data, part_index, 0, d))
+                new_face_normals.append(None)
+                pending_neighbour[slot] = d
+
+    if orphan_count:
+        raise ValueError("'%s' has %d new face(s) sharing no edge with any original face, so there "
+                         "is no real texture assignment to inherit - attach them to existing "
+                         "geometry, or give the part a private skin first" % (obj.name, orphan_count))
+
+    calc_f, calc_v = compute_normals(new_vertices, new_faces)
+    new_face_normals = [n if n is not None else calc_f[i] for i, n in enumerate(new_face_normals)]
+    new_vertex_normals = [n if n is not None else calc_v[i] for i, n in enumerate(new_vertex_normals)]
+
+    neighbours = {}
+    for slot, orig_donor in pending_neighbour.items():
+        ns = face_orig_to_new.get(orig_donor)
+        if ns is not None:
+            neighbours[slot] = ns
+
+    orig_blocks = read_sort_list(rrf_data, part_index, 0)
+    derived_sort = derive_sort_list(orig_blocks, face_orig_to_new, len(new_faces),
+                                    new_face_neighbours=neighbours)
+
+    new_data = rebuild_part_mesh_region(
+        rrf_data, part_index, new_vertices, new_faces, new_tex, new_corners,
+        new_attrib_v, new_material_info=new_mats,
+        new_face_normals=new_face_normals, new_vertex_normals=new_vertex_normals,
+        new_face_records=new_records, new_sort_blocks=derived_sort,
+    )
+    stats = {
+        "vertices": len(new_vertices),
+        "faces": len(new_faces),
+        "added": len(new_faces) - len(face_orig_to_new),
+        "removed": orig_face_count - len(face_orig_to_new),
+    }
+    return new_data, stats
+
+
 class MESH_OT_pe_write_mesh(bpy.types.Operator):
     """Writes this part's CURRENT Blender mesh back to its .RRF - including faces and
     vertices added or deleted in Blender, not just moved ones. The nearest thing this
@@ -3424,146 +3652,25 @@ class MESH_OT_pe_write_mesh(bpy.types.Operator):
         bm.faces.ensure_lookup_table()
         bm.verts.ensure_lookup_table()
 
-        f_idx = bm.faces.layers.int.get("pe_face_index")
-        v_idx = bm.verts.layers.int.get("pe_vertex_index")
-        f_orig = bm.faces.layers.int.get("pe_face_orig")
-        v_orig = bm.verts.layers.int.get("pe_vertex_orig")
-        if f_idx is None or v_idx is None or f_orig is None or v_orig is None:
-            self.report({"ERROR"}, "This mesh predates the pe_face_orig/pe_vertex_orig markers - "
-                                   "re-import it so new geometry can be told from original geometry")
-            return {"CANCELLED"}
-
-        if not bm.faces:
-            self.report({"ERROR"}, "Part has no faces left - refusing to write an empty part")
-            return {"CANCELLED"}
-        ngons = [f for f in bm.faces if len(f.verts) not in (3, 4)]
-        if ngons:
-            self.report({"ERROR"}, str(len(ngons)) + " face(s) are n-gons; this format stores only "
-                                   "triangles and quads - triangulate them first")
-            return {"CANCELLED"}
-        if len(bm.verts) > 0xFFFF:
-            self.report({"ERROR"}, str(len(bm.verts)) + " vertices exceeds this format's 16-bit "
-                                   "per-face vertex indexing (65535 max)")
-            return {"CANCELLED"}
-
         try:
             rrf_data = read_rrf_raw(rrf_filepath)
         except OSError as e:
             self.report({"ERROR"}, "Could not read " + rrf_filepath + ": " + str(e))
             return {"CANCELLED"}
 
-        mesh_off = _mesh_record_offset(part_index, 0)
-        (_mt, orig_face_count, _fl, old_faceNormList_off, orig_vertex_count,
-         _vl, old_vertexNormList_off, _sl, old_attribVList_off) = struct.unpack_from(
-            "<IIIIIIIII", rrf_data, mesh_off)
-
-        is_root = part_index == 0
-        pivot = obj.get("pe_pivot", (0.0, 0.0, 0.0))
-
-        # ---- vertices -------------------------------------------------------
-        new_vertices, new_attrib_v, new_vertex_normals = [], [], []
-        vert_slot = {}
-        for i, v in enumerate(bm.verts):
-            vert_slot[v.index] = i
-            lx, ly, lz = v.co
-            if is_root:
-                new_vertices.append((lx + pivot[0], ly + pivot[1], lz + pivot[2]))
-            else:
-                new_vertices.append((lx, ly, lz))
-            ov = v[v_idx]
-            if v[v_orig] and 0 <= ov < orig_vertex_count:
-                val, = struct.unpack_from("<H", rrf_data, old_attribVList_off + ov * 2)
-                new_attrib_v.append(val)
-                new_vertex_normals.append(read_stored_normal(rrf_data, old_vertexNormList_off, ov))
-            else:
-                new_attrib_v.append(0)
-                new_vertex_normals.append(None)   # filled from real geometry below
-
-        # ---- faces ----------------------------------------------------------
-        new_faces, new_tex, new_corners, new_mats = [], [], [], []
-        new_records, new_face_normals = [], []
-        face_orig_to_new = {}
-        pending_neighbour = {}
-        orphan_count = 0
-        for f in bm.faces:
-            slot = len(new_faces)
-            new_faces.append(tuple(vert_slot[v.index] for v in f.verts))
-            of = f[f_idx]
-            if f[f_orig] and 0 <= of < orig_face_count:
-                new_records.append(read_face_record(rrf_data, part_index, 0, of))
-                new_tex.append(read_face_texture_id(rrf_data, part_index, 0, of) or 0)
-                new_corners.append(read_face_corners(rrf_data, part_index, 0, of))
-                new_mats.append(read_face_material_info(rrf_data, part_index, 0, of))
-                new_face_normals.append(read_stored_normal(rrf_data, old_faceNormList_off, of))
-                face_orig_to_new[of] = slot
-            else:
-                donor = None
-                for e in f.edges:
-                    for nf in e.link_faces:
-                        if nf is not f and nf[f_orig] and 0 <= nf[f_idx] < orig_face_count:
-                            donor = nf
-                            break
-                    if donor is not None:
-                        break
-                if donor is None:
-                    orphan_count += 1
-                    new_records.append(None)
-                    new_tex.append(0)
-                    new_corners.append([(0, 0)] * 4)
-                    new_mats.append(None)
-                    new_face_normals.append(None)
-                else:
-                    d = donor[f_idx]
-                    new_records.append(None)
-                    new_tex.append(read_face_texture_id(rrf_data, part_index, 0, d) or 0)
-                    new_corners.append(read_face_corners(rrf_data, part_index, 0, d))
-                    new_mats.append(read_face_material_info(rrf_data, part_index, 0, d))
-                    new_face_normals.append(None)
-                    pending_neighbour[slot] = d
-
-        if orphan_count:
-            self.report({"ERROR"},
-                        str(orphan_count) + " new face(s) share no edge with any original face, so "
-                        "there is no real texture assignment to inherit - attach them to existing "
-                        "geometry, or give the whole part a private skin first. Nothing written.")
-            return {"CANCELLED"}
-
-        # Normals for anything genuinely new, computed from real geometry.
-        calc_f, calc_v = compute_normals(new_vertices, new_faces)
-        new_face_normals = [n if n is not None else calc_f[i] for i, n in enumerate(new_face_normals)]
-        new_vertex_normals = [n if n is not None else calc_v[i] for i, n in enumerate(new_vertex_normals)]
-
-        # Map each new face to its donor's NEW slot, now that every original is placed.
-        neighbours = {}
-        for slot, orig_donor in pending_neighbour.items():
-            ns = face_orig_to_new.get(orig_donor)
-            if ns is not None:
-                neighbours[slot] = ns
-
         try:
-            orig_blocks = read_sort_list(rrf_data, part_index, 0)
-            derived_sort = derive_sort_list(orig_blocks, face_orig_to_new, len(new_faces),
-                                            new_face_neighbours=neighbours)
-        except ValueError as e:
-            self.report({"ERROR"}, "Could not derive the draw order: " + str(e))
-            return {"CANCELLED"}
-
-        try:
-            new_data = rebuild_part_mesh_region(
-                rrf_data, part_index, new_vertices, new_faces, new_tex, new_corners,
-                new_attrib_v, new_material_info=new_mats,
-                new_face_normals=new_face_normals, new_vertex_normals=new_vertex_normals,
-                new_face_records=new_records, new_sort_blocks=derived_sort,
-            )
+            new_data, stats = write_object_mesh_into_rrf(rrf_data, obj, bm, part_index)
         except (ValueError, struct.error) as e:
-            self.report({"ERROR"}, "Write failed, nothing changed on disk: " + str(e))
+            self.report({"ERROR"}, str(e) + " - nothing written")
             return {"CANCELLED"}
 
         _backup_once(rrf_filepath)
         write_rrf_raw(rrf_filepath, new_data)
 
-        # Re-stamp so the mesh matches the file's new numbering, and everything present
-        # counts as original for any subsequent edit.
+        f_idx = bm.faces.layers.int.get("pe_face_index")
+        v_idx = bm.verts.layers.int.get("pe_vertex_index")
+        f_orig = bm.faces.layers.int.get("pe_face_orig")
+        v_orig = bm.verts.layers.int.get("pe_vertex_orig")
         for i, v in enumerate(bm.verts):
             v[v_idx] = i
             v[v_orig] = 1
@@ -3572,12 +3679,10 @@ class MESH_OT_pe_write_mesh(bpy.types.Operator):
             f[f_orig] = 1
         bmesh.update_edit_mesh(mesh)
 
-        added = len(new_faces) - len(face_orig_to_new)
-        removed = orig_face_count - len(face_orig_to_new)
         self.report({"INFO"},
-                    "Wrote part " + str(part_index) + ": " + str(len(new_vertices)) + " vertex(es), "
-                    + str(len(new_faces)) + " face(s) (+" + str(added) + " new, -" + str(removed)
-                    + " deleted) to " + os.path.basename(rrf_filepath))
+                    "Wrote part %d: %d vertex(es), %d face(s) (+%d new, -%d deleted) to %s"
+                    % (part_index, stats["vertices"], stats["faces"], stats["added"],
+                       stats["removed"], os.path.basename(rrf_filepath)))
         return {"FINISHED"}
 
 
@@ -3870,6 +3975,7 @@ def menu_func_detach_face(self, context):
 def register():
     bpy.utils.register_class(IMPORT_OT_rrf)
     bpy.utils.register_class(EXPORT_OT_rrf_atlas)
+    bpy.utils.register_class(EXPORT_OT_rrf_model)
     bpy.utils.register_class(MESH_OT_pe_detach_face_texture)
     bpy.utils.register_class(MESH_OT_pe_set_face_crop)
     bpy.utils.register_class(MESH_OT_pe_flip_face_texture)
@@ -3893,6 +3999,7 @@ def unregister():
     bpy.utils.unregister_class(MESH_OT_pe_flip_face_texture)
     bpy.utils.unregister_class(MESH_OT_pe_set_face_crop)
     bpy.utils.unregister_class(MESH_OT_pe_detach_face_texture)
+    bpy.utils.unregister_class(EXPORT_OT_rrf_model)
     bpy.utils.unregister_class(EXPORT_OT_rrf_atlas)
     bpy.utils.unregister_class(IMPORT_OT_rrf)
 
