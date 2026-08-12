@@ -4,6 +4,39 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [x] **Writer made lossless, and adding geometry CONFIRMED WORKING in the real tool -
+  2026-08-12.** `rebuild_part_mesh_region()` repacks a part's whole mesh region, and
+  byte-comparing a no-op rebuild (feeding it exactly the data already in the file)
+  exposed that it was silently inventing four things. A no-op rebuild differed from the
+  original by **8,614 bytes**; it now differs by **0**.
+
+  | Lost | Detail |
+  |---|---|
+  | `maxVertex` / `maxAllVertex` | never updated. `Scene.c` shows these size the real per-actor vertex buffers (`vCount=obj->maxAllVertex`, carved per part by `maxVertex`), so growing a part wrote into the next part's slice |
+  | `materialInfo` | hardcoded to `0x9`/`0x19` - 29 distinct real values on one hull collapsed to 2, and every per-face crop size to 16x16 |
+  | face/vertex normals | zero-filled. Real entries are 16.16 unit vectors (measured \|v\|=1.0000) and the engine reads them |
+  | `textureHalf` on triangles | forced to 0, while 10 real triangles store 1 |
+
+  Fixed by carrying real data forward rather than reconstructing it: raw 24-byte face
+  records are copied and only vertex indices remapped (`repack_existing_face_record()`),
+  normals/attribVList/materialInfo are passed through, and the sortList is now **derived
+  from the file's own** (`derive_sort_list()`) instead of regenerated - `compute_sort_list()`
+  matches a real ordering in only 7-11 of 328 positions per block. All of this also
+  repairs the shipped delete operator, which had been losing the same data since July.
+
+  **Real-tool confirmation**: `88Pak43_AddFaceTest.RRF` - a real model with one triangle
+  and three vertices genuinely ADDED - loads correctly in `PEx_105_ObjEdit.exe`, as does
+  a byte-identical no-op control. This is the first time this project has added geometry
+  to a `.RRF` at all; every previous writer only moved or removed things.
+
+  **Process lesson worth keeping.** Most of the day went into a crash hunt against
+  PantherG that produced four real findings by measurement but a wrong diagnosis: the
+  crashes were environmental (that model would not load in that ObjEdit setup even as a
+  byte-identical copy of an unmodified file), and no control was run until very late.
+  Comments asserting the sortList "crashes the real engine" were written into the code on
+  that basis and have since been corrected. Run the unmodified baseline FIRST when a real
+  tool rejects a generated file.
+
 - [ ] **"Add faces" scoped 2026-08-12 - see
   [docs/ADD_FACES_SCOPING.md](docs/ADD_FACES_SCOPING.md).** The last real gap between
   the current surgical editors and an actual `.RRF` exporter. Two findings from the

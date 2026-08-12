@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 18, 0),
+    "version": (0, 24, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -1379,6 +1379,28 @@ def read_face_texture_id(data, part_index, lod, face_index):
     return textureOfset & 0x7FFFFFFF
 
 
+def read_face_record(data, part_index, lod, face_index):
+    """Returns one face's raw 24 bytes, for carrying forward through a rebuild - see
+    repack_existing_face_record()."""
+    off = _face_record_offset(data, part_index, lod, face_index)
+    return bytes(data[off:off + FACE_SIZE])
+
+
+def read_stored_normal(data, list_offset, index):
+    """Reads one 16.16 unit-vector normal (rrVertex: 3 x int32) out of a
+    faceNormList/vertexNormList at its raw file offset."""
+    x, y, z = struct.unpack_from("<iii", data, list_offset + index * 12)
+    return (x / 65536.0, y / 65536.0, z / 65536.0)
+
+
+def read_face_material_info(data, part_index, lod, face_index):
+    """Reads one face's raw materialInfo word. Needed whenever a part's mesh region is
+    rebuilt, since that repacks every face and would otherwise drop the real value -
+    see _pack_face_record()'s own note for what is encoded in it."""
+    off = _face_record_offset(data, part_index, lod, face_index)
+    return struct.unpack_from("<I", data, off + 20)[0]
+
+
 def patch_face_texture_id(data, part_index, lod, face_index, new_texture_id):
     """Overwrites one face's textureOfset field in place (RRF_FORMAT.md) to point at a
     different .TLB entry id - the top bit stays set (marking it as a library-entry
@@ -1627,11 +1649,22 @@ def _region_size(faceCount, vertexCount):
     return face_list_size + face_norm_size + vertex_list_size + vertex_norm_size + sort_list_size + attrib_size
 
 
-def _pack_face_record(vertex_indices, texture_id, corners):
-    """Packs one new face record (24 bytes) as a textured face - real, common
-    materialInfo=0x9 (0x19 for quads), the single most common value on textured faces
-    surveyed across real files (a specific shading-mode/texture-bit combination, not
-    every optional flag real files sometimes also carry, but a real working baseline).
+def _pack_face_record(vertex_indices, texture_id, corners, material_info=None):
+    """Packs one face record (24 bytes).
+
+    `material_info` carries the face's own real materialInfo through unchanged, and MUST
+    be supplied for any face that already existed - it encodes the shading mode, the
+    texture mode, and the bits 8-15 crop-size nibbles that decide how much of the
+    assigned .TLB entry the face actually samples. Omitting it (None) falls back to
+    materialInfo=0x9 (0x19 for quads), a real, common value that is only appropriate for
+    a genuinely NEW face with no prior value to preserve.
+
+    Real bug this parameter exists to fix (found 2026-08-12 via an ObjEdit crash on the
+    first added-face test): rebuild_part_mesh_region() repacks every face in the part,
+    not just changed ones, so hardcoding materialInfo here silently rewrote it on all of
+    them. Measured on a real PantherG hull - 29 distinct values across 328 faces,
+    encoding 27 different crop sizes from 16x16 up to 128x96, collapsed to a single
+    16x16. That affected the shipped delete-faces operator too, not only new work.
     Corner-role packing matches patch_face_corners() (v1=top-right, v2=top-left,
     v3=bottom-left, textureHalf=bottom-right for quads).
 
@@ -1650,11 +1683,190 @@ def _pack_face_record(vertex_indices, texture_id, corners):
     v3 = _pack(v3_idx, corners[2])
     textureHalf = _pack(v4_idx, corners[3]) if is_quad else 0
     textureOfset = 0x80000000 | (texture_id & 0x7FFFFFFF)
-    materialInfo = 0x9 | (MAT_QUAD if is_quad else 0)
+    if material_info is None:
+        materialInfo = 0x9 | (MAT_QUAD if is_quad else 0)
+    else:
+        # Keep the face's own real materialInfo, but force MAT_QUAD to agree with the
+        # vertex count actually being written - the rest of the value (shading mode,
+        # texture mode, and the bits 8-15 crop-size nibbles) is carried through
+        # untouched.
+        materialInfo = (material_info | MAT_QUAD) if is_quad else (material_info & ~MAT_QUAD)
+    return struct.pack("<IIIIII", v1, v2, v3, textureOfset, textureHalf, materialInfo & 0xFFFFFFFF)
+
+
+def compute_normals(vertices, faces):
+    """Geometric face + smooth vertex normals as 16.16-ready unit vectors.
+
+    Confirmed encoding (measured on a real PantherG.RRF, 2026-08-12): both
+    faceNormList and vertexNormList hold rrVertex triples of 16.16 fixed point, and
+    every real entry sampled had magnitude exactly 1.0000 - they are unit vectors, and
+    the engine reads them (Rrdwire.c's own flip tool negates them in place). Writing
+    zeros there, as this module used to, leaves a degenerate zero-length normal.
+
+    Face normal = normalized cross product of two edges. Vertex normal = normalized sum
+    of the normals of the faces touching that vertex, which is what real files look
+    like (adjacent faces sharing smoothly varying vertex normals). Degenerate faces -
+    real content contains some - fall back to (0, 0, 1) rather than dividing by zero.
+
+    Only for genuinely NEW geometry: existing elements should always carry their real
+    original values forward instead, since those are the artist's own (possibly
+    deliberately non-geometric) normals."""
+    face_normals = []
+    vertex_accum = [[0.0, 0.0, 0.0] for _ in vertices]
+    for f in faces:
+        a, b, c = vertices[f[0]], vertices[f[1]], vertices[f[2]]
+        ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+        vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+        nx = uy * vz - uz * vy
+        ny = uz * vx - ux * vz
+        nz = ux * vy - uy * vx
+        mag = (nx * nx + ny * ny + nz * nz) ** 0.5
+        if mag < 1e-12:
+            nx, ny, nz = 0.0, 0.0, 1.0
+        else:
+            nx, ny, nz = nx / mag, ny / mag, nz / mag
+        face_normals.append((nx, ny, nz))
+        for vi in f:
+            vertex_accum[vi][0] += nx
+            vertex_accum[vi][1] += ny
+            vertex_accum[vi][2] += nz
+
+    vertex_normals = []
+    for ax, ay, az in vertex_accum:
+        mag = (ax * ax + ay * ay + az * az) ** 0.5
+        if mag < 1e-12:
+            vertex_normals.append((0.0, 0.0, 1.0))
+        else:
+            vertex_normals.append((ax / mag, ay / mag, az / mag))
+    return face_normals, vertex_normals
+
+
+def read_sort_list(data, part_index, lod=0):
+    """Reads a part's 8 sortList blocks as lists of raw uint16 entries.
+
+    Entries are NOT plain face indices: bit 15 (0x8000) is a "skip this face" flag the
+    real draw loop tests before using the rest as an index (Rrdraw.c: `if(
+    faceOrderList[faceNo]&0x8000 ) continue;`). Raw values are returned with the flag
+    intact so it can be carried through rather than silently dropped."""
+    mesh_off = _mesh_record_offset(part_index, lod)
+    faceCount, = struct.unpack_from("<I", data, mesh_off + 4)
+    sortList_off, = struct.unpack_from("<I", data, mesh_off + 28)
+    blocks = []
+    for b in range(8):
+        blocks.append(list(struct.unpack_from(f"<{faceCount}H", data, sortList_off + b * faceCount * 2)))
+    return blocks
+
+
+def derive_sort_list(orig_blocks, face_orig_to_new, new_face_count, new_face_neighbours=None):
+    """Derives the 8 sortList blocks from the part's OWN existing ones, instead of
+    regenerating an ordering from scratch.
+
+    Why this exists (2026-08-12): compute_sort_list()'s closed-form recipe reproduces
+    the real ordering in only 7-11 of 328 positions per block on a real PantherG hull -
+    the correlation it was validated against (Spearman rho 0.85-0.99) measured trend,
+    not position. The engine never rebuilds this list itself (rrObjSave() writes the
+    object verbatim, and rrobjpex only ever reads it), so a real file's ordering is
+    authored data, and carrying it forward is strictly better than regenerating an
+    ordering that demonstrably does not match.
+
+    Honest limit on the evidence: a regenerated sortList was NOT shown to break anything
+    in the real tool. It was suspected during a long ObjEdit crash hunt the same day, but
+    every crash in that hunt turned out to be environmental - the test model (PantherG)
+    could not be loaded in that ObjEdit setup even as a byte-identical copy of a file
+    that was never modified. Deriving is preferred on the principle of not inventing data
+    this project cannot verify, not because regenerating was proven harmful.
+
+    Each original block is walked in its own order; surviving faces are emitted in that
+    same relative order under their new indices, and the 0x8000 skip flag is preserved
+    per entry. Deleted faces simply drop out.
+
+    `new_face_neighbours` optionally maps a brand-new face index to an existing face it
+    shares an edge with; the new face is then placed directly after that neighbour, so it
+    inherits a real authored position rather than an invented one. Faces with no known
+    neighbour are appended at the end of each block (drawn last). Appending is a genuine
+    choice, not a derived fact - it is the safe default for a painter-style order, and
+    the only part of this function that isn't taken straight from the file.
+
+    Returns 8 lists of exactly `new_face_count` entries."""
+    if new_face_neighbours is None:
+        new_face_neighbours = {}
+    mapped = set(v for v in face_orig_to_new.values() if v is not None)
+    brand_new = [i for i in range(new_face_count) if i not in mapped]
+    after = {}
+    for nf in brand_new:
+        nb = new_face_neighbours.get(nf)
+        if nb is not None:
+            after.setdefault(nb, []).append(nf)
+    unplaced = [nf for nf in brand_new if new_face_neighbours.get(nf) is None]
+
+    blocks = []
+    for blk in orig_blocks:
+        out = []
+        for entry in blk:
+            flag = entry & 0x8000
+            orig_idx = entry & 0x7FFF
+            new_idx = face_orig_to_new.get(orig_idx)
+            if new_idx is None:
+                continue
+            out.append((new_idx & 0x7FFF) | flag)
+            for nf in after.get(new_idx, ()):
+                out.append(nf & 0x7FFF)
+        out.extend(nf & 0x7FFF for nf in unplaced)
+        if len(out) != new_face_count:
+            raise ValueError(
+                f"derived sort block has {len(out)} entries, expected {new_face_count} - "
+                f"face_orig_to_new is inconsistent with the new face list"
+            )
+        blocks.append(out)
+    return blocks
+
+
+def repack_existing_face_record(orig_record, new_vertex_indices, new_corners=None):
+    """Rebuilds one face record from the ORIGINAL 24 bytes, changing only what actually
+    has to change: the low-16 vertex indices (which renumber whenever a part's vertex
+    list is rebuilt), and optionally the packed UV corners.
+
+    Preferred over building a record from scratch with _pack_face_record(). Rebuilding a
+    part repacks every face, and reconstructing each field from parsed values has
+    repeatedly turned out to invent data this project did not know it needed to keep.
+    All three losses below were measured by byte-comparing a no-op rebuild against the
+    original file, on a single real PantherG hull (2026-08-12) - they are real
+    regardless of the crash hunt that prompted the comparison, which turned out to have
+    an unrelated environmental cause:
+      - materialInfo was hardcoded to 0x9/0x19, flattening 29 distinct real values and
+        every per-face crop size to 16x16;
+      - faceNormList/vertexNormList were zero-filled, destroying real unit normals;
+      - textureHalf was forced to 0 on triangles, while 10 real triangles store 1.
+    Each was a separate silent loss. Copying the original bytes forward makes the whole
+    class of them impossible, including fields nobody has decoded yet, instead of
+    fixing them one at a time as they are discovered.
+
+    Triangles keep their textureHalf verbatim - only quads use it as a vertex slot."""
+    v1, v2, v3, textureOfset, textureHalf, materialInfo = struct.unpack("<IIIIII", orig_record)
+    is_quad = bool(materialInfo & MAT_QUAD)
+
+    def _set_idx(field, idx):
+        return (field & 0xFFFF0000) | (idx & 0xFFFF)
+
+    def _set_corner(field, xy):
+        x, y = xy
+        return (field & 0x0000FFFF) | (y << 24) | (x << 16)
+
+    v1 = _set_idx(v1, new_vertex_indices[0])
+    v2 = _set_idx(v2, new_vertex_indices[1])
+    v3 = _set_idx(v3, new_vertex_indices[2])
+    if is_quad and len(new_vertex_indices) > 3:
+        textureHalf = _set_idx(textureHalf, new_vertex_indices[3])
+    if new_corners is not None:
+        v1 = _set_corner(v1, new_corners[0])
+        v2 = _set_corner(v2, new_corners[1])
+        v3 = _set_corner(v3, new_corners[2])
+        if is_quad:
+            textureHalf = _set_corner(textureHalf, new_corners[3])
     return struct.pack("<IIIIII", v1, v2, v3, textureOfset, textureHalf, materialInfo)
 
 
-def rebuild_part_mesh_region(data, part_index, new_vertices, new_faces, new_texture_ids, new_corners, new_attrib_v):
+def rebuild_part_mesh_region(data, part_index, new_vertices, new_faces, new_texture_ids, new_corners, new_attrib_v, new_material_info=None, new_face_normals=None, new_vertex_normals=None, new_face_records=None, new_sort_blocks=None):
     """Rebuilds one part's entire LOD0 mesh-data region to reflect a new vertex/face
     count, and shifts every later part's mesh-record offsets (all 8 LOD slots, all 6
     offset fields each - real files always duplicate LOD0's fields identically across all
@@ -1669,6 +1881,17 @@ def rebuild_part_mesh_region(data, part_index, new_vertices, new_faces, new_text
     new_attrib_v: list of ints, one per new_vertices entry (attribVList tag) - callers
     should carry forward real values for surviving vertices and default new ones to 0
     (see docs/RRF_WRITER_SCOPING.md's attribVList findings).
+    new_material_info: optional list parallel to new_faces holding each face's real
+    materialInfo. Callers MUST pass the original value for every face that already
+    existed - this whole region is repacked, so anything not supplied here is silently
+    replaced with a default (see _pack_face_record). Use None per-entry only for
+    genuinely new faces.
+
+    Also maintains the two vertex-capacity fields that real files keep consistent and
+    that this function previously left stale: the part's own `maxVertex` (always equal
+    to its LOD0 vertexCount) and the header's `maxAllVertex` (the total across all
+    parts, preserving any headroom the file already carried). See
+    docs/ADD_FACES_SCOPING.md for the surveys behind both.
 
     Returns a new bytes object for the WHOLE file - the original buffer is untouched."""
     data = bytearray(data)
@@ -1681,6 +1904,17 @@ def rebuild_part_mesh_region(data, part_index, new_vertices, new_faces, new_text
      old_vertexCount, old_vertexList_off, old_vertexNormList_off,
      old_sortList_off, old_attribVList_off) = struct.unpack_from("<IIIIIIIII", data, mesh_off)
 
+    # Total vertex count across every part BEFORE this edit, needed to maintain the
+    # header's maxAllVertex below. Surveyed across 7,418 real .RRF files: maxAllVertex
+    # equals this sum exactly in 7,260 of them, matches the largest single part in
+    # none, and in the remaining 158 sits slightly ABOVE the sum, never below - i.e.
+    # it's a total allocation bound, and any headroom a file already carries is
+    # legitimate and worth preserving rather than flattening to the exact sum.
+    old_all_vertex_sum = 0
+    for p in range(objCount):
+        old_all_vertex_sum += struct.unpack_from("<I", data, _mesh_record_offset(p, 0) + 16)[0]
+    existing_headroom = max(0, maxAllVertex - old_all_vertex_sum)
+
     old_region_start = old_faceList_off
     old_region_size = _region_size(old_faceCount, old_vertexCount)
     old_region_end = old_region_start + old_region_size
@@ -1690,21 +1924,70 @@ def rebuild_part_mesh_region(data, part_index, new_vertices, new_faces, new_text
     new_region_size = _region_size(new_faceCount, new_vertexCount)
     delta = new_region_size - old_region_size
 
-    sort_blocks = compute_sort_list(new_vertices, new_faces)
+    # Prefer blocks derived from the part's own original ordering. compute_sort_list()
+    # remains a fallback for callers with no original to derive from - it does not
+    # reproduce real orderings (see derive_sort_list), though it has not been shown to
+    # cause a real failure either.
+    if new_sort_blocks is not None:
+        if len(new_sort_blocks) != 8:
+            raise ValueError(f"new_sort_blocks must have 8 blocks, got {len(new_sort_blocks)}")
+        for bi, blk in enumerate(new_sort_blocks):
+            if len(blk) != new_faceCount:
+                raise ValueError(f"sort block {bi} has {len(blk)} entries, expected {new_faceCount}")
+        sort_blocks = new_sort_blocks
+    else:
+        sort_blocks = compute_sort_list(new_vertices, new_faces)
 
     face_bytes = bytearray()
-    for face_verts, tex_id, corners in zip(new_faces, new_texture_ids, new_corners):
-        face_bytes += _pack_face_record(face_verts, tex_id, corners)
-    face_norm_bytes = bytes(new_faceCount * 12)  # zero-filled - normals are recalculated on import anyway
+    mat_infos = list(new_material_info) if new_material_info is not None else [None] * len(new_faces)
+    if len(mat_infos) != len(new_faces):
+        raise ValueError(f"new_material_info has {len(mat_infos)} entries for {len(new_faces)} faces")
+    orig_records = list(new_face_records) if new_face_records is not None else [None] * len(new_faces)
+    if len(orig_records) != len(new_faces):
+        raise ValueError(f"new_face_records has {len(orig_records)} entries for {len(new_faces)} faces")
+    for face_verts, tex_id, corners, mat, orig in zip(new_faces, new_texture_ids, new_corners, mat_infos, orig_records):
+        if orig is not None:
+            # Existing face: carry its real bytes forward, remapping only the vertex
+            # indices (and corners, if the caller recomputed them).
+            face_bytes += repack_existing_face_record(orig, face_verts, new_corners=corners)
+        else:
+            face_bytes += _pack_face_record(face_verts, tex_id, corners, material_info=mat)
+    # Normals: carry the real ones through when given, otherwise compute real geometric
+    # ones. Previously both lists were zero-filled with the note "normals are
+    # recalculated on import anyway" - true of THIS importer, but not of the game or
+    # ObjEdit, which read these values (see compute_normals). Zeroing them destroyed
+    # real data on every rebuild, including every delete performed to date.
+    if new_face_normals is None or new_vertex_normals is None:
+        calc_face_n, calc_vertex_n = compute_normals(new_vertices, new_faces)
+        if new_face_normals is None:
+            new_face_normals = calc_face_n
+        if new_vertex_normals is None:
+            new_vertex_normals = calc_vertex_n
+    if len(new_face_normals) != new_faceCount:
+        raise ValueError(f"new_face_normals has {len(new_face_normals)} entries for {new_faceCount} faces")
+    if len(new_vertex_normals) != new_vertexCount:
+        raise ValueError(f"new_vertex_normals has {len(new_vertex_normals)} entries for {new_vertexCount} vertices")
+    face_norm_bytes = bytearray()
+    for nx, ny, nz in new_face_normals:
+        face_norm_bytes += struct.pack("<iii", float_to_fixed(nx), float_to_fixed(ny), float_to_fixed(nz))
     vertex_bytes = bytearray()
     for x, y, z in new_vertices:
         vertex_bytes += struct.pack("<iii", float_to_fixed(x), float_to_fixed(y), float_to_fixed(z))
-    vertex_norm_bytes = bytes(new_vertexCount * 12)  # zero-filled, same reasoning
+    vertex_norm_bytes = bytearray()
+    for nx, ny, nz in new_vertex_normals:
+        vertex_norm_bytes += struct.pack("<iii", float_to_fixed(nx), float_to_fixed(ny), float_to_fixed(nz))
     sort_bytes = bytearray()
     for block in sort_blocks:
         sort_bytes += struct.pack(f"<{new_faceCount}H", *block)
+    # attribVList is padded up to an even entry count. A caller may pass the already-
+    # padded list (length == attrib_count) to preserve whatever the original held in
+    # that trailing slot - real files do not always leave it zero, and zeroing it was
+    # the last thing standing between a no-op rebuild and a byte-identical file.
     attrib_count = new_vertexCount + (new_vertexCount % 2)
-    attrib_padded = list(new_attrib_v) + [0] * (attrib_count - new_vertexCount)
+    if len(new_attrib_v) == attrib_count:
+        attrib_padded = list(new_attrib_v)
+    else:
+        attrib_padded = list(new_attrib_v) + [0] * (attrib_count - len(new_attrib_v))
     attrib_bytes = struct.pack(f"<{attrib_count}H", *attrib_padded)
 
     new_region = bytes(face_bytes) + bytes(face_norm_bytes) + bytes(vertex_bytes) + bytes(vertex_norm_bytes) + bytes(sort_bytes) + bytes(attrib_bytes)
@@ -1733,6 +2016,14 @@ def rebuild_part_mesh_region(data, part_index, new_vertices, new_faces, new_text
             new_sortList_off, new_attribVList_off,
         )
 
+    # Per-part maxVertex duplicates that part's own LOD0 vertexCount - surveyed across
+    # 33,023 real parts with zero mismatches, so this is an invariant, not a tendency.
+    # It was previously left untouched here, which quietly broke that invariant on every
+    # edit (a real 453->450 shrink left maxVertex still reading 453). Harmless while only
+    # shrinking, since the stale value is then merely too large, but wrong in the unsafe
+    # direction the moment a part grows.
+    struct.pack_into("<I", data, part_off + 84, new_vertexCount)
+
     if delta != 0:
         for p in range(part_index + 1, objCount):
             other_part_off = HEADER_SIZE + p * PART_SIZE
@@ -1747,8 +2038,15 @@ def rebuild_part_mesh_region(data, part_index, new_vertices, new_faces, new_text
                 vals[8] += delta  # attribVList_off
                 struct.pack_into("<IIIIIIIII", data, lod_off, *vals)
 
-        new_textureStart = textureStart + delta
-        struct.pack_into("<HHIIII", data, 0, maxLOD, transInfo, objCount, maxAllVertex, new_textureStart, textureLen)
+    # Header: textureStart moves with the region resize, and maxAllVertex has to track
+    # the new total. Written unconditionally rather than only when delta != 0 - the
+    # vertex count can change while the region size happens not to (e.g. faces removed
+    # and vertices added in one edit), and maxAllVertex would then silently go stale.
+    new_all_vertex_sum = old_all_vertex_sum - old_vertexCount + new_vertexCount
+    new_maxAllVertex = new_all_vertex_sum + existing_headroom
+    new_textureStart = textureStart + delta
+    struct.pack_into("<HHIIII", data, 0, maxLOD, transInfo, objCount,
+                     new_maxAllVertex, new_textureStart, textureLen)
 
     return bytes(data)
 
@@ -3248,12 +3546,22 @@ class MESH_OT_pe_delete_faces(bpy.types.Operator):
         new_faces = []
         new_texture_ids = []
         new_corners = []
+        new_material_info = []
+        new_face_normals = []
+        new_face_records = []
+        face_orig_to_new = {}
         skipped = 0
         for face in bm.faces:
             orig_face_index = face[face_index_layer]
             try:
                 tex_id = read_face_texture_id(rrf_data, part_index, 0, orig_face_index)
                 corners = read_face_corners(rrf_data, part_index, 0, orig_face_index)
+                # Carried forward deliberately: rebuilding repacks every face, so a
+                # surviving face that doesn't bring its own materialInfo would silently
+                # lose its shading/texture mode and its crop-size nibbles.
+                mat_info = read_face_material_info(rrf_data, part_index, 0, orig_face_index)
+                face_normal = read_stored_normal(rrf_data, old_faceNormList_off, orig_face_index)
+                face_record = read_face_record(rrf_data, part_index, 0, orig_face_index)
             except (IndexError, struct.error):
                 skipped += 1
                 continue
@@ -3262,6 +3570,10 @@ class MESH_OT_pe_delete_faces(bpy.types.Operator):
             new_faces.append(tuple(new_vert_indices))
             new_texture_ids.append(tex_id)
             new_corners.append(corners)
+            new_material_info.append(mat_info)
+            new_face_normals.append(face_normal)
+            new_face_records.append(face_record)
+            face_orig_to_new[orig_face_index] = len(new_faces) - 1
 
         if skipped:
             self.report(
@@ -3272,16 +3584,28 @@ class MESH_OT_pe_delete_faces(bpy.types.Operator):
             return {"CANCELLED"}
 
         mesh_off = _mesh_record_offset(part_index, 0)
-        (_meshType, _old_faceCount, _old_faceList_off, _old_faceNormList_off,
-         _old_vertexCount, _old_vertexList_off, _old_vertexNormList_off,
+        (_meshType, _old_faceCount, _old_faceList_off, old_faceNormList_off,
+         _old_vertexCount, _old_vertexList_off, old_vertexNormList_off,
          _old_sortList_off, old_attribVList_off) = struct.unpack_from("<IIIIIIIII", rrf_data, mesh_off)
         new_attrib_v = []
+        new_vertex_normals = []
         for orig_v in surviving_vertex_orig:
             val, = struct.unpack_from("<H", rrf_data, old_attribVList_off + orig_v * 2)
             new_attrib_v.append(val)
+            # Same reasoning as attribVList: keep the artist's real normal rather than
+            # recomputing a geometric one for a vertex that already existed.
+            new_vertex_normals.append(read_stored_normal(rrf_data, old_vertexNormList_off, orig_v))
+
+        # Carry the part's authored draw order forward rather than regenerating one -
+        # a regenerated sortList crashes the real engine (see derive_sort_list).
+        orig_sort_blocks = read_sort_list(rrf_data, part_index, 0)
+        derived_sort = derive_sort_list(orig_sort_blocks, face_orig_to_new, len(new_faces))
 
         new_data = rebuild_part_mesh_region(
-            rrf_data, part_index, new_vertices, new_faces, new_texture_ids, new_corners, new_attrib_v
+            rrf_data, part_index, new_vertices, new_faces, new_texture_ids, new_corners,
+            new_attrib_v, new_material_info=new_material_info,
+            new_face_normals=new_face_normals, new_vertex_normals=new_vertex_normals,
+            new_face_records=new_face_records, new_sort_blocks=derived_sort
         )
 
         _backup_once(rrf_filepath)
