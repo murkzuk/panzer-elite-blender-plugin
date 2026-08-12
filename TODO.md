@@ -4,6 +4,39 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [ ] **Model AND paint a new vehicle entirely in Blender - scoped 2026-08-12, see
+  [docs/AUTHORING_SCOPING.md](docs/AUTHORING_SCOPING.md).** User's stated direction: model
+  in Blender, paint in Blender, get a working `.RRF` **and its `.TLB`** out, with ObjEdit
+  no longer in the loop.
+
+  Over half of this already exists - the `.TLB` writer is byte-exact, the `_8.BMP`
+  writer + palette quantiser are real, and `MESH_OT_pe_give_private_skin` already builds
+  a brand-new dedicated `.TLB`/`.BMP` for a part with real per-face crops. The catch is
+  that every writer here still edits a file that already exists.
+
+  Four gaps, in dependency order: (1) **`create_rrf()`** - header + 512-byte part array +
+  hierarchy from nothing, the blocker; (2) a **real palette** for a new `.TLB`
+  (`new_tlb_library()` currently writes 2048 zero bytes = black, and private-skin borrows
+  from an existing BMP that a new model does not have); (3) an **`.RRI` writer** - ObjEdit
+  warns "No RRI file found, No auto load of textures!" and loads untextured without one;
+  (4) **`sortList` with no original to derive from** - `derive_sort_list()` needs an
+  authored ordering, leaving only `compute_sort_list()`, which matches real data in just
+  7-11 of 328 positions per block.
+
+  (4) is the one real risk and it is measurable rather than speculative: there are 7,418
+  real `.RRF` files on disk holding 8 known-good blocks each, so the rule can be fitted
+  until it reproduces them byte-exactly instead of merely correlating. Worth doing before
+  anything depends on it.
+
+  Also unresolved and needed for (1): the collision-box fields. A PEDG post states
+  outright that adding an object to an RRF requires adjusting the bounding box, and
+  ObjEdit exposes "match hull/turret/gun/parent" speed keys for it - `boxPos[4]`
+  semantics should be read out of ObjEdit's own source rather than invented.
+
+  Recommended order: `.RRI` writer and palette sourcing first - both are small and improve
+  the existing edit-and-paint workflow on their own, regardless of whether the
+  from-scratch writer ever lands.
+
 - [x] **Writer made lossless, and adding geometry CONFIRMED WORKING in the real tool -
   2026-08-12.** `rebuild_part_mesh_region()` repacks a part's whole mesh region, and
   byte-comparing a no-op rebuild (feeding it exactly the data already in the file)

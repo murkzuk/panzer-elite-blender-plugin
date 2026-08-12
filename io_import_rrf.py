@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 24, 0),
+    "version": (0, 25, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -2283,6 +2283,20 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_f
             for i in range(len(mesh.vertices)):
                 vertex_index_attr.data[i].value = i
 
+            # "This element came from the file" marker. pe_face_index/pe_vertex_index
+            # alone cannot answer that: BMesh zero-initialises custom data on newly
+            # created elements, so a face the user adds in Blender arrives claiming
+            # index 0 - indistinguishable from real face 0. These start at 1 for
+            # everything imported, so anything reading 0 is genuinely new. Required by
+            # MESH_OT_pe_write_mesh to tell which elements have real file data to carry
+            # forward and which have to be built from scratch.
+            face_orig_attr = mesh.attributes.new(name="pe_face_orig", type="INT", domain="FACE")
+            for i in range(len(mesh.polygons)):
+                face_orig_attr.data[i].value = 1
+            vertex_orig_attr = mesh.attributes.new(name="pe_vertex_orig", type="INT", domain="POINT")
+            for i in range(len(mesh.vertices)):
+                vertex_orig_attr.data[i].value = 1
+
             if slot_sources:
                 uv_layer = mesh.uv_layers.new(name="UVMap")
                 unresolved_attr = mesh.attributes.new(
@@ -3352,6 +3366,221 @@ class MESH_OT_pe_give_private_skin(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class MESH_OT_pe_write_mesh(bpy.types.Operator):
+    """Writes this part's CURRENT Blender mesh back to its .RRF - including faces and
+    vertices added or deleted in Blender, not just moved ones. The nearest thing this
+    project has to a model exporter.
+
+    Scope, stated plainly: this rewrites one part of the .RRF the mesh was imported
+    from. It is not "save an arbitrary Blender object as a new .RRF" - creating parts,
+    hierarchy and attributes from nothing is a separate, unbuilt job (see
+    docs/ADD_FACES_SCOPING.md, Phase 3).
+
+    Everything that already existed keeps its real file data: each surviving face's raw
+    24-byte record (texture id, crop corners, materialInfo) is carried forward with only
+    its vertex indices remapped, and each surviving vertex keeps its own stored normal
+    and attribVList tag. The draw order is derived from the part's own sortList rather
+    than regenerated. Elements are identified as original via the pe_face_orig/
+    pe_vertex_orig markers stamped at import - anything reading 0 was created in Blender.
+
+    A genuinely NEW face has no texture data of its own, so it inherits the whole
+    assignment (texture id, crop corners and materialInfo) from a face it shares an edge
+    with - the same "borrow from a real neighbour" approach used elsewhere in this
+    plugin, chosen over inventing values or allocating fresh atlas space. It therefore
+    samples exactly the same texture rectangle as that neighbour; giving new geometry its
+    own UV area is a separate job (MESH_OT_pe_give_private_skin already does that for a
+    whole part). New faces with no original neighbour are refused rather than guessed at.
+
+    New vertices get a computed geometric normal and a zero attribVList tag, matching the
+    documented safe baseline for both.
+
+    Refuses rather than risks the file when: the mesh has an n-gon (the format stores
+    only triangles and quads), the part would exceed the format's 16-bit vertex indexing,
+    every face has been deleted, or the mesh predates the pe_face_orig marker and so
+    cannot be checked for new geometry. Makes the usual one-time .bak first."""
+
+    bl_idname = "mesh.pe_write_mesh"
+    bl_label = "PE: Write Mesh to .RRF (incl. added/deleted faces)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (
+            obj is not None
+            and obj.type == "MESH"
+            and obj.mode == "EDIT"
+            and "pe_rrf_filepath" in obj
+            and "pe_part_index" in obj
+        )
+
+    def execute(self, context):
+        obj = context.active_object
+        mesh = obj.data
+        rrf_filepath = obj["pe_rrf_filepath"]
+        part_index = obj["pe_part_index"]
+
+        bm = bmesh.from_edit_mesh(mesh)
+        bm.faces.ensure_lookup_table()
+        bm.verts.ensure_lookup_table()
+
+        f_idx = bm.faces.layers.int.get("pe_face_index")
+        v_idx = bm.verts.layers.int.get("pe_vertex_index")
+        f_orig = bm.faces.layers.int.get("pe_face_orig")
+        v_orig = bm.verts.layers.int.get("pe_vertex_orig")
+        if f_idx is None or v_idx is None or f_orig is None or v_orig is None:
+            self.report({"ERROR"}, "This mesh predates the pe_face_orig/pe_vertex_orig markers - "
+                                   "re-import it so new geometry can be told from original geometry")
+            return {"CANCELLED"}
+
+        if not bm.faces:
+            self.report({"ERROR"}, "Part has no faces left - refusing to write an empty part")
+            return {"CANCELLED"}
+        ngons = [f for f in bm.faces if len(f.verts) not in (3, 4)]
+        if ngons:
+            self.report({"ERROR"}, str(len(ngons)) + " face(s) are n-gons; this format stores only "
+                                   "triangles and quads - triangulate them first")
+            return {"CANCELLED"}
+        if len(bm.verts) > 0xFFFF:
+            self.report({"ERROR"}, str(len(bm.verts)) + " vertices exceeds this format's 16-bit "
+                                   "per-face vertex indexing (65535 max)")
+            return {"CANCELLED"}
+
+        try:
+            rrf_data = read_rrf_raw(rrf_filepath)
+        except OSError as e:
+            self.report({"ERROR"}, "Could not read " + rrf_filepath + ": " + str(e))
+            return {"CANCELLED"}
+
+        mesh_off = _mesh_record_offset(part_index, 0)
+        (_mt, orig_face_count, _fl, old_faceNormList_off, orig_vertex_count,
+         _vl, old_vertexNormList_off, _sl, old_attribVList_off) = struct.unpack_from(
+            "<IIIIIIIII", rrf_data, mesh_off)
+
+        is_root = part_index == 0
+        pivot = obj.get("pe_pivot", (0.0, 0.0, 0.0))
+
+        # ---- vertices -------------------------------------------------------
+        new_vertices, new_attrib_v, new_vertex_normals = [], [], []
+        vert_slot = {}
+        for i, v in enumerate(bm.verts):
+            vert_slot[v.index] = i
+            lx, ly, lz = v.co
+            if is_root:
+                new_vertices.append((lx + pivot[0], ly + pivot[1], lz + pivot[2]))
+            else:
+                new_vertices.append((lx, ly, lz))
+            ov = v[v_idx]
+            if v[v_orig] and 0 <= ov < orig_vertex_count:
+                val, = struct.unpack_from("<H", rrf_data, old_attribVList_off + ov * 2)
+                new_attrib_v.append(val)
+                new_vertex_normals.append(read_stored_normal(rrf_data, old_vertexNormList_off, ov))
+            else:
+                new_attrib_v.append(0)
+                new_vertex_normals.append(None)   # filled from real geometry below
+
+        # ---- faces ----------------------------------------------------------
+        new_faces, new_tex, new_corners, new_mats = [], [], [], []
+        new_records, new_face_normals = [], []
+        face_orig_to_new = {}
+        pending_neighbour = {}
+        orphan_count = 0
+        for f in bm.faces:
+            slot = len(new_faces)
+            new_faces.append(tuple(vert_slot[v.index] for v in f.verts))
+            of = f[f_idx]
+            if f[f_orig] and 0 <= of < orig_face_count:
+                new_records.append(read_face_record(rrf_data, part_index, 0, of))
+                new_tex.append(read_face_texture_id(rrf_data, part_index, 0, of) or 0)
+                new_corners.append(read_face_corners(rrf_data, part_index, 0, of))
+                new_mats.append(read_face_material_info(rrf_data, part_index, 0, of))
+                new_face_normals.append(read_stored_normal(rrf_data, old_faceNormList_off, of))
+                face_orig_to_new[of] = slot
+            else:
+                donor = None
+                for e in f.edges:
+                    for nf in e.link_faces:
+                        if nf is not f and nf[f_orig] and 0 <= nf[f_idx] < orig_face_count:
+                            donor = nf
+                            break
+                    if donor is not None:
+                        break
+                if donor is None:
+                    orphan_count += 1
+                    new_records.append(None)
+                    new_tex.append(0)
+                    new_corners.append([(0, 0)] * 4)
+                    new_mats.append(None)
+                    new_face_normals.append(None)
+                else:
+                    d = donor[f_idx]
+                    new_records.append(None)
+                    new_tex.append(read_face_texture_id(rrf_data, part_index, 0, d) or 0)
+                    new_corners.append(read_face_corners(rrf_data, part_index, 0, d))
+                    new_mats.append(read_face_material_info(rrf_data, part_index, 0, d))
+                    new_face_normals.append(None)
+                    pending_neighbour[slot] = d
+
+        if orphan_count:
+            self.report({"ERROR"},
+                        str(orphan_count) + " new face(s) share no edge with any original face, so "
+                        "there is no real texture assignment to inherit - attach them to existing "
+                        "geometry, or give the whole part a private skin first. Nothing written.")
+            return {"CANCELLED"}
+
+        # Normals for anything genuinely new, computed from real geometry.
+        calc_f, calc_v = compute_normals(new_vertices, new_faces)
+        new_face_normals = [n if n is not None else calc_f[i] for i, n in enumerate(new_face_normals)]
+        new_vertex_normals = [n if n is not None else calc_v[i] for i, n in enumerate(new_vertex_normals)]
+
+        # Map each new face to its donor's NEW slot, now that every original is placed.
+        neighbours = {}
+        for slot, orig_donor in pending_neighbour.items():
+            ns = face_orig_to_new.get(orig_donor)
+            if ns is not None:
+                neighbours[slot] = ns
+
+        try:
+            orig_blocks = read_sort_list(rrf_data, part_index, 0)
+            derived_sort = derive_sort_list(orig_blocks, face_orig_to_new, len(new_faces),
+                                            new_face_neighbours=neighbours)
+        except ValueError as e:
+            self.report({"ERROR"}, "Could not derive the draw order: " + str(e))
+            return {"CANCELLED"}
+
+        try:
+            new_data = rebuild_part_mesh_region(
+                rrf_data, part_index, new_vertices, new_faces, new_tex, new_corners,
+                new_attrib_v, new_material_info=new_mats,
+                new_face_normals=new_face_normals, new_vertex_normals=new_vertex_normals,
+                new_face_records=new_records, new_sort_blocks=derived_sort,
+            )
+        except (ValueError, struct.error) as e:
+            self.report({"ERROR"}, "Write failed, nothing changed on disk: " + str(e))
+            return {"CANCELLED"}
+
+        _backup_once(rrf_filepath)
+        write_rrf_raw(rrf_filepath, new_data)
+
+        # Re-stamp so the mesh matches the file's new numbering, and everything present
+        # counts as original for any subsequent edit.
+        for i, v in enumerate(bm.verts):
+            v[v_idx] = i
+            v[v_orig] = 1
+        for i, f in enumerate(bm.faces):
+            f[f_idx] = i
+            f[f_orig] = 1
+        bmesh.update_edit_mesh(mesh)
+
+        added = len(new_faces) - len(face_orig_to_new)
+        removed = orig_face_count - len(face_orig_to_new)
+        self.report({"INFO"},
+                    "Wrote part " + str(part_index) + ": " + str(len(new_vertices)) + " vertex(es), "
+                    + str(len(new_faces)) + " face(s) (+" + str(added) + " new, -" + str(removed)
+                    + " deleted) to " + os.path.basename(rrf_filepath))
+        return {"FINISHED"}
+
+
 class MESH_OT_pe_write_vertex_positions(bpy.types.Operator):
     """Writes the mesh's current vertex positions back into the .RRF - Phase 1 of the
     geometry writer (see docs/RRF_WRITER_SCOPING.md). Repositions existing vertices only:
@@ -3635,6 +3864,7 @@ def menu_func_detach_face(self, context):
     self.layout.operator(MESH_OT_pe_give_private_skin.bl_idname, icon="IMAGE_PLANE")
     self.layout.operator(MESH_OT_pe_write_vertex_positions.bl_idname, icon="VERTEXSEL")
     self.layout.operator(MESH_OT_pe_delete_faces.bl_idname, icon="TRASH")
+    self.layout.operator(MESH_OT_pe_write_mesh.bl_idname, icon="EXPORT")
 
 
 def register():
@@ -3644,6 +3874,7 @@ def register():
     bpy.utils.register_class(MESH_OT_pe_set_face_crop)
     bpy.utils.register_class(MESH_OT_pe_flip_face_texture)
     bpy.utils.register_class(MESH_OT_pe_give_private_skin)
+    bpy.utils.register_class(MESH_OT_pe_write_mesh)
     bpy.utils.register_class(MESH_OT_pe_write_vertex_positions)
     bpy.utils.register_class(MESH_OT_pe_delete_faces)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
@@ -3656,6 +3887,7 @@ def unregister():
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     bpy.utils.unregister_class(MESH_OT_pe_delete_faces)
+    bpy.utils.unregister_class(MESH_OT_pe_write_mesh)
     bpy.utils.unregister_class(MESH_OT_pe_write_vertex_positions)
     bpy.utils.unregister_class(MESH_OT_pe_give_private_skin)
     bpy.utils.unregister_class(MESH_OT_pe_flip_face_texture)
