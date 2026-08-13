@@ -279,3 +279,42 @@ distance of ~0.93).
   64x64 entry is deliberate tiling.
 - Auto-detect flagged itself as **not confident** on `CustomA1.TLB` (CustomC1 scores 98%
   too). Worth remembering when judging any remaining colour difference on this model.
+
+---
+
+## OPEN 2026-08-13: per-face texture ORIENTATION
+
+User observation on `CustomA/Sdkfz184.RRF`, comparing Blender against ObjEdit's own
+render: the casemate and the gun barrel are rotated 90 degrees. Rotating the all-zero
+corner order by one step (v1 = top-left instead of top-right) makes **the casemate
+perfect but breaks everything else** - the hull Balkenkreuz degrades into an unreadable
+striped bar. So orientation is **per face**, not a global convention, and one piece is
+still missing.
+
+### What orientation is stored in
+
+`rrRotateTexture()` (Rrdwire.c) rotates a face's texture purely by **permuting the vertex
+indices** `v1 -> v2 -> v3 -> v4`, touching no UV value and no flag. So the face's vertex
+order *is* the orientation.
+
+### Ruled out
+
+- **A global corner-order rotation.** All four were rendered; each fixes some faces and
+  breaks others.
+- **A materialInfo rotation flag.** `Object.h` defines only `MAT_SHADING_MASK` (bits
+  0-1), `MAT_TEXTRUE_MASK` (bits 2-3, values NO=0 / NORMAL=8), `MAT_QUAD` (16),
+  `MAT_TWOSIDE` (32). Bits 6-7 are **0 on all 396 faces**. `textureHalf` upper 16 is 0 on
+  all 396.
+- **textureOfset bits 16-31 as a linear tile index**, per rrSetTextureSelection()'s own
+  commented-out original (`ofset/(sizeX>>4)`, `ofset%(sizeX>>4)`). Tried in both axis
+  orders: **far worse** than origin (0,0) - road wheels and hull markings vanish. The
+  engine comments it out as "error with chris tracks", so the shipped renderer does not
+  use it either. The value is still parsed and carried in `face_crop_size[4]`, unused.
+
+### Live lead
+
+Blender **reverses the winding on 27 of 380 faces** at import (verified: they are
+reversals, not rotations - 0 are pure rotations). A reversed winding mirrors the texture,
+and on striped camo a mirror reads as a rotation. The flips are concentrated in
+`Main_Gun` - one of the two parts the user reports as wrong. Preserving the file's exact
+vertex order through `mesh.validate()` / normal-consistency is the next thing to try.

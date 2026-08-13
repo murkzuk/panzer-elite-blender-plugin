@@ -1671,7 +1671,19 @@ def _read_mesh_lod0(data, mesh_off):
             # 99.9%. Bits 16-23 are in fact high bits of the texture id, not an origin.
             crop_start_x = ((textureOfset >> 24) & 0xF) * 16
             crop_start_y = ((textureOfset >> 28) & 0x7) * 16
-            face_crop_size.append((crop_size_x, crop_size_y, crop_start_x, crop_start_y))
+            # textureOfset bits 16-31 also carry a per-face value (spread 0..24 on real
+            # models, not a 2-bit flag). rrSetTextureSelection() has a commented-out
+            # original that reads it as a LINEAR TILE INDEX into the entry:
+            #     ofset  = (orgTexture>>16)&0xffff;
+            #     xOfset = ofset/(rrTextLibPartSizeX[i]>>4);
+            #     yOfset = ofset%(rrTextLibPartSizeX[i]>>4);
+            # TESTED AND DISPROVED (2026-08-13): decoding it that way, in either axis
+            # order, is far worse than leaving the origin at (0,0) - road wheels and hull
+            # markings vanish entirely. The engine comments it out as "error with chris
+            # tracks", so the shipped renderer does not use it either. Parsed and carried
+            # here so the value is available, but deliberately NOT applied.
+            crop_tile_index = (textureOfset >> 16) & 0xFFFF
+            face_crop_size.append((crop_size_x, crop_size_y, crop_start_x, crop_start_y, crop_tile_index))
         else:
             face_texture_id.append(None)
             face_uv_corners.append(None)
@@ -2942,7 +2954,7 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_f
                             # large entry all sampled its top-left corner.
                             crop = part.face_crop_size[poly.index]
                             if crop:
-                                crop_w, crop_h, start_x, start_y = crop
+                                crop_w, crop_h, start_x, start_y = crop[:4]
                             else:
                                 crop_w, crop_h, start_x, start_y = sizeX, sizeY, 0, 0
                             start_x = min(start_x, max(sizeX - 1, 0))
