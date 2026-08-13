@@ -4,6 +4,39 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [x] **Jumbled textures on multi-library models - real cause found and fixed 2026-08-12.**
+  User report: "the TLB import still brings in jumbled textures... we are not right on
+  reading the texture data from the RRF". Correct on both counts.
+
+  **A face names its own library slot and resolution ignored it.** The old code scanned
+  every loaded library and returned the first holding a matching part id; many libraries
+  share ids, so faces were textured from the wrong libraries. Resolution now tries the
+  face's own slot first.
+
+  **Auto-detect numbered its score-ranked matches 0,1,2...**, which made a face's slot
+  meaningless. It now assigns libraries to the slots faces actually name, keeping the
+  score-ranked list as fallback - per-slot assignment alone covers fewer ids and regressed
+  Is2-0 from 0 to 422 unresolved before the fallback was restored.
+
+  **An .RRI can be structurally unable to name a slot.** The 8- and 16-slot variants
+  cannot express slots 16-31; a real Tiger1 has 289 faces in slot 16 against a 16-slot
+  RRI. Those slots are now inferred while the RRI wins wherever it speaks.
+
+  **Slots with very few distinct ids cannot identify their library.** On Italy_Obj's
+  Tiger1, 89% of faces sit in one slot referencing just TWO entries - they are large
+  sheets and each face's corner crop picks a sub-area - so every library in the folder
+  ties and the winner was arbitrary (an Italy Tiger picking up CustomA1). Confident slots
+  are now settled first and low-id slots break ties toward the family already chosen, so
+  AUTO reaches the same answer as setting the theatre by hand. Verified visually: the
+  Italy Tiger now renders in proper theatre camo.
+
+  Two dead ends worth not repeating: TLBs come in three sizes (461K/1.5M/3.6M) because 64
+  of them embed their own bitmap, but the entry table is identical so reading the first
+  461,064 bytes is correct; and an embedded bitmap differing from its sibling `_8.BMP` in
+  100% of bytes turned out to be the same artwork with a different palette.
+
+  Still open: the running gear on that Tiger renders dark red-brown and looks wrong.
+
 - [x] **Texture-library remap (ObjEdit's ReNumTLB) - built 2026-08-12.**
   `MESH_OT_pe_remap_texture_library` repoints a model's faces from one library slot to
   another, for moving a vehicle onto a different theatre's libraries without re-texturing

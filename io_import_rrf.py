@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 39, 0),
+    "version": (0, 40, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -853,14 +853,42 @@ def assign_libraries_to_slots(search_folder, parts, name_prefix=None):
     if not libraries:
         return {}, []
 
+    # Two passes. A slot with plenty of distinct ids identifies its library on its own;
+    # a slot with only a handful does not - real models exist where 89% of the faces sit
+    # in one slot that references just TWO entries, because those are large sheets and
+    # each face's corner crop picks a sub-area out of them. Every library in the folder
+    # contains ids that low, so the score ties and the winner is arbitrary (an Italy Tiger
+    # was picking up CustomA1). Settle the confident slots first, then break ties on the
+    # remaining ones in favour of the family already chosen - a model overwhelmingly draws
+    # from one theatre's libraries.
+    CONFIDENT_MIN_IDS = 5
+
+    def family(path):
+        """The leading alphabetic run of a library name - "CustomA1" -> "customa",
+        "Italy3" -> "italy" - so libraries from the same theatre/pack group together."""
+        base = os.path.splitext(os.path.basename(path))[0]
+        out = []
+        for ch in base:
+            if ch.isalpha():
+                out.append(ch)
+            else:
+                break
+        return ("".join(out) or base).lower()
+
     assigned, report = {}, []
-    for slot in sorted(by_slot):
+    order = sorted(by_slot, key=lambda sl: -len(by_slot[sl]))
+    chosen_families = set()
+    for slot in order:
         ids = by_slot[slot]
-        best, best_hits = None, 0
+        confident = len(ids) >= CONFIDENT_MIN_IDS
+        best, best_hits, best_pref = None, 0, False
         for path, tlb_parts in libraries:
             hits = sum(1 for i in ids if i in tlb_parts)
-            if hits > best_hits:
-                best, best_hits = (path, tlb_parts), hits
+            if not hits:
+                continue
+            prefer = (not confident) and chosen_families and family(path) in chosen_families
+            if hits > best_hits or (hits == best_hits and prefer and not best_pref):
+                best, best_hits, best_pref = (path, tlb_parts), hits, prefer
         if best is None or not best_hits:
             report.append("slot %d: %d id(s), no library matched" % (slot, len(ids)))
             continue
@@ -871,8 +899,11 @@ def assign_libraries_to_slots(search_folder, parts, name_prefix=None):
                           % (slot, os.path.basename(path)))
             continue
         assigned[slot] = (tlb_parts, atlas, path)
-        report.append("slot %d -> %s (%d/%d ids)"
-                      % (slot, os.path.basename(path), best_hits, len(ids)))
+        if len(ids) >= CONFIDENT_MIN_IDS:
+            chosen_families.add(family(path))
+        report.append("slot %d -> %s (%d/%d ids%s)"
+                      % (slot, os.path.basename(path), best_hits, len(ids),
+                         "" if len(ids) >= CONFIDENT_MIN_IDS else ", few ids - low confidence"))
     return assigned, report
 
 
