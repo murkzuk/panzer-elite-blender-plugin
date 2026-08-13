@@ -4,6 +4,23 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [x] **Texture resolution: the 32-library extension - found and fixed 2026-08-12. Large
+  real improvement.** Reading `rrReNumTLB()` while scoping a library-remap feature turned
+  up how the engine actually decodes `textureOfset`: slot = bits 12-15, part = bits 0-11,
+  **and when that part number exceeds 2047 the real slot is slot+16 and the real part is
+  part-2048**. Resolving with `texture_id % 4096` alone misses every such face.
+
+  **22.8% of textured faces on a real install use that encoding** (82,109 of 359,735),
+  concentrated in the Tiger and IS-2 families. `resolve_texture_id()` now tries both
+  candidates - not a switch on the >2047 test, since some models' ids above 2047 are
+  genuine part numbers and forcing the subtraction makes those worse; trying both can
+  only ever add a resolution.
+
+  Through the real import operator: **TigerE_1 35% -> 100%, TigerL 71% -> 100%**, Is2-0
+  99.2% -> 100%, all three now importing with zero unresolved faces. TigerL was
+  previously documented in TEXTURE_ID_RESOLUTION.md as resolving inconsistently (19-95%).
+  No regression on models that already resolved fully.
+
 - [x] **Face draw-order nudge - built 2026-08-12.** `MESH_OT_pe_move_face_draw_order`
   ("PE: Move Face(s) in Draw Order"). Worth building precisely because the ordering is
   hand-authored: there is no algorithm to recalculate it with, so the one-step nudge is

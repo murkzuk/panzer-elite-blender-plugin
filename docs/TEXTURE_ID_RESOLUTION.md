@@ -203,3 +203,42 @@ was an artifact of the slot-cap bug, not a real property of the saved data.
 Practical takeaway: import will texture whatever resolves and flag the rest for manual
 re-texturing (see [PLUGIN_USAGE.md](PLUGIN_USAGE.md)) — for a `.RRI`-backed import this
 should now be a small handful of faces at most, not a systematic gap.
+
+
+## The 32-library extension (found 2026-08-12 - a major resolution fix)
+
+`rrReNumTLB()` in `rrobjpex.c` shows how the engine really decodes a face's
+`textureOfset`:
+
+```c
+ActTLB = (textureOfset >> 12) & 0xf;    // library slot, bits 12-15
+TexNum =  textureOfset & 0xfff;         // part id within that library, bits 0-11
+if (TexNum > 2047) { ActTLB += 16; TexNum -= 2048; }   // slots 16-31
+```
+
+That last line is a **32-library extension**: when the 12-bit part number exceeds 2047,
+the real slot is `slot + 16` and the real part id is `TexNum - 2048`. Resolving with
+`texture_id % 4096` alone returns the un-adjusted number and finds nothing.
+
+This is not a rare corner. **22.8% of textured faces across a real install (82,109 of
+359,735) use it**, concentrated in the Tiger and IS-2 families.
+
+`resolve_texture_id()` now tries **both** candidates rather than switching on the >2047
+test, because which is correct depends on what is loaded in the slot - models exist whose
+ids above 2047 are genuine part numbers, and forcing the subtraction makes those worse.
+Trying both can only add a resolution, never remove one.
+
+Measured on real models, resolved against every library in the Texture folder:
+
+| Model | Before | After |
+|---|---|---|
+| TigerE_1.RRF | 35.0% | **100%** |
+| TigerL.RRF | 71.1% | **100%** |
+| Is2-0.rrf | 99.2% | **100%** |
+| PantherG.RRF | 100% | 100% |
+| 88Pak43.RRF | 100% | 100% |
+
+Confirmed through the real import operator: TigerL, TigerE_1 and Is2-0 now come in with
+**zero** unresolved faces, where TigerL was previously documented in this file as
+resolving inconsistently (19-95%). PantherG's remaining 8 faces (0.2%) are the genuinely
+unrecoverable live-HAL-handle case described above, not this bug.

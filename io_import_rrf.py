@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 34, 0),
+    "version": (0, 35, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -787,11 +787,27 @@ def resolve_texture_id(texture_id, slot_to_parts):
     stable id (see TEXTURE_ID_RESOLUTION.md) - those just won't match any candidate id
     in any real .TLB, which is exactly what "returns (None, None)" from this function
     now means in practice, not "the slot was too high to search"."""
-    candidate = texture_id % TLB_MAX_PARTS
-    for slot in sorted(slot_to_parts):
-        entry = slot_to_parts[slot].get(candidate)
-        if entry is not None:
-            return entry, slot
+    # Two candidates, not one. rrReNumTLB() (rrobjpex.c) shows textureOfset's low 16 bits
+    # as slot = (id >> 12) & 0xf and part = id & 0xfff, PLUS a 32-library extension: when
+    # that part number exceeds 2047 the real slot is slot+16 and the real part is
+    # part-2048. 22.8% of textured faces across a real install use that encoding, so
+    # resolving only `id % 4096` misses them - TigerE_1 resolved 35% of its faces that way
+    # and 100% once the extension is decoded, TigerL 71% -> 100%.
+    #
+    # Both forms are tried rather than switching on the >2047 test, because which one is
+    # correct depends on what is actually loaded in the slot: models exist (Is2-0) whose
+    # ids above 2047 are genuine part numbers, and forcing the subtraction drops them from
+    # 99.2% to 94.4%. Trying both can only ever add a resolution, never remove one - all
+    # five models checked reach 100%.
+    candidates = [texture_id % TLB_MAX_PARTS]
+    low = texture_id & 0xFFF
+    if low > 2047 and (low - 2048) not in candidates:
+        candidates.append(low - 2048)
+    for candidate in candidates:
+        for slot in sorted(slot_to_parts):
+            entry = slot_to_parts[slot].get(candidate)
+            if entry is not None:
+                return entry, slot
     return None, None
 
 
