@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 49, 0),
+    "version": (0, 50, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -3456,13 +3456,44 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
                                 extra = {}
                             spare = 1000
                             added = 0
-                            for _sl, entry in sorted(extra.items()):
-                                if entry[0] and (unresolved_ids & set(entry[0])):
-                                    while spare in slot_sources:
-                                        spare += 1
-                                    slot_sources[spare] = entry
+                            still = set(unresolved_ids)
+                            candidates = [entry for _sl, entry in sorted(extra.items())]
+                            # assign_libraries_to_slots() only proposes ONE library per
+                            # slot the model uses, so for a single-slot model it can hand
+                            # back the very library that is missing the id. Widen the
+                            # search to every .TLB in the folder - m4a3e2 and M4a3 are both
+                            # short exactly one id (23), yet only M4a3 happened to get a
+                            # usable proposal, which made the fallback look like it worked.
+                            try:
+                                for _name in sorted(os.listdir(folder)):
+                                    if not _name.lower().endswith(".tlb"):
+                                        continue
+                                    _path = os.path.join(folder, _name)
+                                    try:
+                                        _parts_tlb = read_tlb(_path)
+                                    except Exception:
+                                        continue
+                                    if still & set(_parts_tlb):
+                                        candidates.append(
+                                            (_parts_tlb, find_atlas_image(_path), _path))
+                            except OSError:
+                                pass
+                            for entry in candidates:
+                                if not entry or not entry[0]:
+                                    continue
+                                covers = still & set(entry[0])
+                                if not covers:
+                                    continue
+                                if not entry[1]:
+                                    continue  # no atlas bitmap - cannot paint from it
+                                while spare in slot_sources:
                                     spare += 1
-                                    added += 1
+                                slot_sources[spare] = entry
+                                spare += 1
+                                added += 1
+                                still -= covers
+                                if not still:
+                                    break
                             if added:
                                 detect_msg += (" + %d fallback librar%s for %d id(s) the "
                                                "named library lacks"

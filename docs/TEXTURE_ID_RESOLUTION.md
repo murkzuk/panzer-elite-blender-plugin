@@ -489,3 +489,22 @@ session, which was right for the wheel shadow and the theatre rule - and wrong h
 the editor and the importer disagree, check whether the importer's output is independently
 plausible (a recognisable vehicle with correct markings) before assuming the importer is
 at fault. Three failed hypotheses in a row is the signal to stop and measure.
+
+### v0.50.0: the id-fallback has to search the whole folder
+
+`m4a3e2.RRF` came in with **38 unresolved faces** even though M4a3 - short of the *same*
+single id (23) - resolved cleanly. The v0.49.0 fallback only considered what
+`assign_libraries_to_slots()` proposed, and that returns **one library per used slot**; for
+a single-slot model it can hand back the very library that lacks the id. M4a3 only worked
+by luck of what it happened to propose.
+
+The fallback now scans every `.TLB` in the texture folder for the missing ids, adding the
+first that covers them (and skipping any library with no atlas bitmap, which cannot paint).
+It stops as soon as everything is covered.
+
+Verified at v0.50.0, all **0 unresolved**: m4a3e2 (331 faces), M4a3 (321), M3 (125),
+Psw222 (137), PantherG (321).
+
+`m4a3e2` is a second confirmed case of **the importer being right where ObjEdit is not** -
+it renders as a correct M4A3E2 Jumbo, distinctive thick turret and all, from the file
+ObjEdit shows as grey-and-green patches.
