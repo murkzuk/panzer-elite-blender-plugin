@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 44, 0),
+    "version": (0, 45, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -2999,7 +2999,33 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_f
                                 x1, y1 = e_ox + e_sx - 1, e_oy + e_sy - 1
                                 rect = [(x1, y0), (x0, y0), (x0, y1), (x1, y1)]
                                 corners = rect[:len(corners)]
-                        for loop_index, (lx, ly) in zip(poly.loop_indices, corners):
+                        # Bind each corner to the FILE's vertex, not to the loop's
+                        # position in the polygon.
+                        #
+                        # PE stores a face's texture ORIENTATION in its vertex order -
+                        # rrRotateTexture() (Rrdwire.c) rotates a texture purely by
+                        # permuting v1->v2->v3->v4, touching no UV value and no flag. So
+                        # corner i belongs to file vertex i, permanently.
+                        #
+                        # Zipping corners onto poly.loop_indices positionally assumed
+                        # Blender kept that order. It does not: _recalculate_normals()
+                        # reverses the winding of any face whose normal disagreed with
+                        # its neighbours - measured at 27 of 380 faces on Sdkfz184,
+                        # concentrated in Main_Gun. A reversed winding mirrors the
+                        # texture, and on striped camo a mirror reads as a 90 degree
+                        # rotation, which is exactly what the user reported on the
+                        # casemate and gun barrel.
+                        file_face = part.faces[poly.index] if poly.index < len(part.faces) else ()
+                        corner_of_vertex = {}
+                        if len(file_face) == len(corners):
+                            for vidx, xy in zip(file_face, corners):
+                                corner_of_vertex.setdefault(vidx, xy)
+                        for slot, loop_index in enumerate(poly.loop_indices):
+                            vidx = mesh.loops[loop_index].vertex_index
+                            # Fall back to positional order if this face repeats a vertex
+                            # index (the dict cannot disambiguate those) or the counts
+                            # disagree, which keeps degenerate faces behaving as before.
+                            lx, ly = corner_of_vertex.get(vidx, corners[min(slot, len(corners) - 1)])
                             atlas_x = posX * 16 + lx
                             atlas_y = posY * 16 + ly
                             u = atlas_x / ATLAS_WIDTH

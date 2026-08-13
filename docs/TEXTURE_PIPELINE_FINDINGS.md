@@ -282,7 +282,7 @@ distance of ~0.93).
 
 ---
 
-## OPEN 2026-08-13: per-face texture ORIENTATION
+## SOLVED 2026-08-13: per-face texture ORIENTATION (v0.45.0)
 
 User observation on `CustomA/Sdkfz184.RRF`, comparing Blender against ObjEdit's own
 render: the casemate and the gun barrel are rotated 90 degrees. Rotating the all-zero
@@ -311,10 +311,31 @@ order *is* the orientation.
   engine comments it out as "error with chris tracks", so the shipped renderer does not
   use it either. The value is still parsed and carried in `face_crop_size[4]`, unused.
 
-### Live lead
+### The cause
 
-Blender **reverses the winding on 27 of 380 faces** at import (verified: they are
-reversals, not rotations - 0 are pure rotations). A reversed winding mirrors the texture,
-and on striped camo a mirror reads as a rotation. The flips are concentrated in
-`Main_Gun` - one of the two parts the user reports as wrong. Preserving the file's exact
-vertex order through `mesh.validate()` / normal-consistency is the next thing to try.
+`_recalculate_normals()` reverses the winding of any face whose normal disagreed with its
+neighbours - **27 of 380 faces on Sdkfz184**, measured as reversals (0 were pure
+rotations), concentrated in `Main_Gun`. The UV assignment then zipped the corner list onto
+`poly.loop_indices` *positionally*, so a reversed loop received mirrored UVs. On striped
+camo a mirror reads as a 90 degree rotation - precisely what was reported.
+
+### The fix (v0.45.0)
+
+Bind each corner to the **file's vertex index**, not to the loop's position:
+
+```python
+file_face = part.faces[poly.index]
+corner_of_vertex = {vidx: xy for vidx, xy in zip(file_face, corners)}
+for loop_index in poly.loop_indices:
+    lx, ly = corner_of_vertex[mesh.loops[loop_index].vertex_index]
+```
+
+This is correct by construction rather than by luck: PE stores orientation *in* the vertex
+order, so corner i belongs to file vertex i permanently, whatever Blender later does to
+the winding. Faces that repeat a vertex index fall back to positional order.
+
+Changed 6.05% of pixels on Sdkfz184: the gun barrel gained its camo banding instead of a
+smooth lengthwise gradient, and the casemate stripes took on the organic wavy shape
+ObjEdit shows. On the Italy Tiger the turret's red tactical number renders as a readable
+**212** where it was previously a garbled smear - the signature of an un-mirrored texture.
+No change in resolution rates (Tiger 4785/0 unresolved, Sherman 885/0).
