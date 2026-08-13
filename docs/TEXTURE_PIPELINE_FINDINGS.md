@@ -532,5 +532,12 @@ note the exact cell labels at its left/right and top/bottom edges (e.g. "spans 1
 2,45"), then read the same face's UV bounds out of Blender. The two rectangles in atlas
 pixels give the residual offset and scale directly - no theorising required.
 
-`cutX`/`cutY` are the cheapest thing to check first: they are already parsed in
-`read_tlb()` and currently ignored.
+**Candidate 2 already RULED OUT.** `cutX`/`cutY` are non-zero on 228 of the test
+library's 235 entries, but their values (48, 96, 128, 256, 464 ...) exceed the 256px atlas
+width and bear no relation to the entry's `posX`/`posY`. Example: id 1 sits at atlas tile
+(0,0) yet carries `cut=(48,0)`. They record where the entry was cut from in the ARTIST'S
+ORIGINAL SOURCE IMAGE - provenance, not an atlas offset. Correctly ignored by the
+importer; not the residual error.
+
+That leaves the **half-texel convention** as the leading candidate, and ObjEdit's own
+viewport scaling as the thing to rule out before trusting the comparison at all.
