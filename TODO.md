@@ -4,6 +4,35 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [ ] **Full gap analysis against the real ObjEdit - see
+  [docs/GAP_ANALYSIS.md](docs/GAP_ANALYSIS.md), compiled 2026-08-12** by enumerating all
+  68 `rrobjx5.dll` exports and every ObjEdit dialog unit, then checking each against what
+  this add-on does.
+
+  Ranked gaps: (1) **gameplay attributes are read-only** - `objAttribut` is imported as a
+  custom property and never written, so TANK/TURM/KANNONE/MUZZLE tags and the hide flag
+  cannot be set from Blender; the plugin writes exactly one part-record field
+  (`maxVertex`) plus the collision box. Highest value for least work, and a model needs
+  these to function in game. (2) part/hierarchy editing - add/remove/rename/re-parent,
+  pivot writing (`create_rrf()` territory). (3) face draw order - now known to be
+  hand-authored, so a "move face earlier/later" pair would genuinely help. (4) texture ops
+  still missing: `rrRotateTextureSelection`, `rrReNumTLB` (remap a model to another
+  library), `rrSetTextureSelection`. (5) LOD levels. (6) groups. (7) palette editing.
+
+  Explicitly NOT gaps: selection-level geometry ops (Blender does these better, and the
+  write-back carries them through), render plumbing, and `AnimationUnit`/`BallisticUnit`
+  (both call no DLL functions - stubs).
+
+  **Useful discovery: a 3DS -> RRF path exists today.** ObjEdit's Import 3DS calls
+  `_mcMake` in `meshconv.dll`, which is present next to the working ObjEdit even though
+  its source is not in the archives. Model in Blender, export 3DS, import in ObjEdit - a
+  real stopgap for authoring from scratch until `create_rrf()` is built.
+
+  Worth adding beyond parity: a validation/lint operator (unresolved faces, invalid
+  sortList blocks, capacity fields, a collision box that no longer contains its mesh,
+  n-gons - every one has been a real bug here), whole-vehicle private skin on one atlas,
+  genuine LOD generation, texture-aware mirroring, and an RRF-to-RRF diff.
+
 - [x] **Collision box decoded and wired in - 2026-08-12.** `rrDoGenBounding()`
   (`Rrdwire.c`), the function behind ObjEdit's Bounding Box > Gen button, scans a part's
   LOD0 vertices and writes `boxRangeX/Y/Z` as per-axis min/max plus `boxPosX/Y[4]` as the
