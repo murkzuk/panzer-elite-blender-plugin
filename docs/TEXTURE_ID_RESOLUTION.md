@@ -432,3 +432,32 @@ listing a single library.
 Rewritten across the install: Normandy 259, Italy 370, Desert 318. Originals (pre-2020
 timestamps) untouched throughout - the genuine ones are dated 1999, which makes them
 trivially separable from generated ones.
+
+### Absolute paths: why a relative .RRI can load the WRONG library
+
+After the narrow rewrite the "Texture ID Too High!" error was gone and Psw222 and PantherG
+rendered perfectly - but **M3 still failed**. The cause is the `chdir` gotcha, now with
+teeth:
+
+**ObjEdit `chdir()`s to its OWN folder before resolving the .RRI**, so `texture\Normandy2.tlb`
+loads the library sitting next to *ObjEdit*, not next to the model. The user's OE_2
+`Texture/` holds an extended REDUX set under the same filenames, and the two editions
+differ in content:
+
+| model | slot -> library | coverage from the game install | coverage from OE_2's copy |
+|---|---|---|---|
+| **M3** | 1 -> Normandy2 | 95.2% | **71.4%** |
+| Psw222 | 0 -> Normandy1 | 100% | 100% |
+| PantherG | 0 -> Normandy1 | 95.7% | 100% |
+
+Only M3's slot maps to a library whose OE_2 edition differs materially - which is exactly
+why it alone failed while the other two looked perfect. Nothing was wrong with the model,
+the rule, or the importer.
+
+`--absolute` writes the full path (`K:\Panzer Elite\Texture\Normandy2.tlb`), which pins the
+library regardless of where ObjEdit is launched from. Real shipped .RRI files use both
+styles, so this is in-format. Applied across the install: Normandy 259, Italy 370,
+Desert 318.
+
+**Recommend `--absolute` whenever ObjEdit lives outside the game folder**, which is the
+common case for a modding setup.

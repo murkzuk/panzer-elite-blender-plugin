@@ -73,6 +73,12 @@ def main():
     ap.add_argument("--write", action="store_true", help="actually write files (default is a dry run)")
     ap.add_argument("--force", action="store_true", help="overwrite an existing .RRI (NOT recommended - a real .RRI outranks the rule)")
     ap.add_argument("--full-set", action="store_true", help="list the whole theatre set rather than only the slots the model uses (makes ObjEdit load libraries it does not need, which can trip its 'Texture ID Too High!' check)")
+    ap.add_argument("--absolute", action="store_true",
+                    help=("write full absolute library paths instead of relative ones. "
+                          "ObjEdit chdir()s to its OWN folder before resolving an .RRI, so "
+                          "a relative path silently loads whatever library sits beside "
+                          "ObjEdit - possibly a different edition of the same name. Real "
+                          "shipped .RRI files use both styles."))
     ap.add_argument("--partial", action="store_true", help="write even when some slots have no library on disk")
     ap.add_argument("--recursive", action="store_true", help="walk subfolders, using each model's own folder to pick its theatre")
     ap.add_argument("--texture-folder", default=None, help="override the Texture folder")
@@ -158,7 +164,8 @@ def main():
         # Guarantee the slots this model actually names are present even if the numbering
         # above missed them (e.g. a slot beyond the theatre's own numbered range).
         for s_i, entry in built.items():
-            slots.setdefault(s_i, os.path.join("texture", os.path.basename(entry[2])))
+            slots.setdefault(s_i, os.path.abspath(entry[2]) if args.absolute
+                             else os.path.join("texture", os.path.basename(entry[2])))
         if not slots:
             skipped_unresolved += 1
             continue
