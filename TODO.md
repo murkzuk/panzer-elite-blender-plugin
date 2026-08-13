@@ -4,7 +4,7 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
-- [ ] **NEXT: headless DLL harness for ground-truth face UVs - see
+- [x] **DONE 2026-08-13: headless DLL harness BUILT and working (`tools/headless_oracle/`, needs the 32-bit Python at K:\Python32). It already fixed the crop-origin bits. See
   [docs/HEADLESS_DLL_HARNESS_PLAN.md](docs/HEADLESS_DLL_HARNESS_PLAN.md).** User's idea
   (2026-08-13), feasibility checked and it is real.
 
@@ -48,7 +48,8 @@ Running list of things flagged during work sessions, not yet done. Newest first.
   resolved against ObjEdit's own folder. Fix by placing the library where ObjEdit looks or
   using an absolute path in the .RRI, then read the grid labels off a face.
 
-- [ ] **UNSOLVED: how face texture coordinates are actually derived.** The "jumbled
+- [ ] **NEXT: per-face texture ORIENTATION (the remaining piece).** Live lead: Blender reverses the winding on 27/380 faces at import, concentrated in Main_Gun. See the OPEN section of docs/TEXTURE_PIPELINE_FINDINGS.md for what is already ruled out.
+- [ ] **PARTLY SOLVED: how face texture coordinates are actually derived.** Crop origin bits fixed v0.43.0, colour key fixed v0.44.0. The "jumbled
   textures" symptom is NOT fixed, and the crop-rectangle model previously recorded in
   RRF_FORMAT.md is now known to be wrong. Written up in full there; the short version:
 
