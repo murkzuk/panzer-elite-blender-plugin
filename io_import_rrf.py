@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 47, 0),
+    "version": (0, 48, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -778,6 +778,42 @@ def decode_texture_offset(value):
     return upper, slot, part_id
 
 
+def texture_slot_candidates(value):
+    """Every plausible (slot, part_id) reading of a textureOfset, best guess first.
+
+    `decode_texture_offset()` applies a "part id above 2047 means slot+16, id-2048" rule
+    for 32-library content. That rule is right for some models and demonstrably wrong for
+    others: on a real Desert install it asks for slots 16/17/23 - i.e. Desert17/18/24 -
+    when only Desert1-6 and 8 exist, blocking 56 models. Decoding the raw fields instead
+    (slot = bits 12-15, id = bits 0-11) names slots that DO exist and cover their ids at
+    98-100%.
+
+    Neither reading can be declared correct in isolation - the hack was added for real
+    32-library content (it took TigerE_1 from 35% to 100% resolved and TigerL from 71%),
+    and its "115,613 faces round-tripped" evidence only ever proved decode and encode are
+    inverses: reversibility, not correctness. So both readings are offered here and the
+    caller picks whichever names a library that actually exists, which is evidence neither
+    reading can supply on its own.
+
+    Returns [(slot, part_id), ...] - the hacked reading first (preserving existing
+    behaviour when both are viable), the raw reading second when it differs.
+    """
+    raw_slot = (value >> 12) & 0xF
+    raw_id = value & 0xFFF
+    out = []
+    if raw_id > 2047:
+        out.append((raw_slot + 16, raw_id - 2048))
+    out.append((raw_slot, raw_id))
+    # de-duplicate while keeping order
+    seen = set()
+    ordered = []
+    for cand in out:
+        if cand not in seen:
+            seen.add(cand)
+            ordered.append(cand)
+    return ordered
+
+
 def encode_texture_offset(upper, slot, part_id):
     """Inverse of decode_texture_offset(), including the 32-library extension: slots 16
     and above are stored as slot-16 with 2048 added to the part id."""
@@ -828,15 +864,29 @@ def theatre_prefix_from_path(rrf_filepath):
     return None
 
 
-def slots_used_by(parts):
-    """The set of library slots a model's faces actually name."""
+def slots_used_by(parts, available_slots=None):
+    """The set of library slots a model's faces actually name.
+
+    `available_slots`, when given, is the set of slot numbers for which a library really
+    exists. A face whose primary (hacked) reading names a slot outside that set is
+    re-read with the raw fields - see texture_slot_candidates(). Without it, behaviour is
+    unchanged.
+    """
     used = set()
     for part in parts:
         for tid in getattr(part, "face_texture_id", None) or ():
             if tid is None:
                 continue
-            _upper, slot, _pid = decode_texture_offset(tid)
-            used.add(slot)
+            cands = texture_slot_candidates(tid)
+            if available_slots is not None:
+                for slot, _pid in cands:
+                    if slot in available_slots:
+                        used.add(slot)
+                        break
+                else:
+                    used.add(cands[0][0])
+            else:
+                used.add(cands[0][0])
     return used
 
 
@@ -867,7 +917,14 @@ def theatre_set_libraries(search_folder, parts, theatre_prefix):
                     for n in os.listdir(search_folder) if n.lower().endswith(".tlb")}
     except OSError:
         return resolved, report
-    for slot in sorted(slots_used_by(parts)):
+    # Which theatre slots have a library at all? Faces whose hacked slot falls outside
+    # this set are re-read raw, which is what unblocks the Desert models asking for
+    # nonexistent Desert17/18/24.
+    available = set()
+    for idx in range(32):
+        if ("%s%d.tlb" % (theatre_prefix, idx + 1)).lower() in existing:
+            available.add(idx)
+    for slot in sorted(slots_used_by(parts, available_slots=available)):
         wanted = "%s%d.tlb" % (theatre_prefix, slot + 1)
         # `existing` is keyed lowercase; real installs mix Normandy2.tlb / Normandy3.TLB.
         path = existing.get(wanted.lower())

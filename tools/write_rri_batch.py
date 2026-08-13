@@ -107,7 +107,16 @@ def main():
             continue
         try:
             parts = rrf.read_rrf(m)
-            used = sorted(rrf.slots_used_by(parts))
+            # Ask which slots are used with the SAME library-availability knowledge the
+            # resolver uses. Computing it without that re-introduces the +2048 hack's
+            # phantom slots (Desert 16/17/23) and skips models the resolver can handle.
+            try:
+                on_disk = {n.lower() for n in os.listdir(tex) if n.lower().endswith(".tlb")}
+            except OSError:
+                on_disk = set()
+            avail = {i for i in range(32)
+                     if ("%s%d.tlb" % (theatre, i + 1)).lower() in on_disk}
+            used = sorted(rrf.slots_used_by(parts, available_slots=avail))
             built, _report = rrf.theatre_set_libraries(tex, parts, theatre)
         except Exception as exc:
             print("  FAIL  %-42s %s" % (os.path.basename(m), exc))

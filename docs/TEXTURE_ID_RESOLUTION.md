@@ -367,3 +367,28 @@ it blind risks regressing the models it was meant to fix (TigerE_1, TigerL went 
 the hacked slot names a library that does not exist. Re-run
 `tools/write_rri_batch.py "K:\Panzer Elite\Desert_Obj" --write` afterwards to pick up the
 remaining 56.
+
+## FIXED (v0.48.0): the +2048 slot hack is now conditional
+
+`texture_slot_candidates()` offers **both** readings of a `textureOfset`, best guess
+first: the hacked one (`id > 2047` -> slot+16, id-2048) and the raw one
+(`slot = bits 12-15`, `id = bits 0-11`). `slots_used_by()` takes an optional
+`available_slots` set and picks the first candidate naming a library that actually exists,
+falling back to the hacked reading when nothing is known.
+
+This is deliberately evidence-driven rather than a choice between the two rules. Neither
+is correct in isolation - the hack is right for genuine 32-library content and wrong for
+Desert - and "which library exists on disk" is evidence neither reading can supply itself.
+
+**Regression check (the models the hack exists for):** `TigerE_1.RRF` against a texture
+folder that really does have CustomA17/18 - slots unchanged `[0, 13, 16, 17]`, coverage
+unchanged at **96.9%**. The conditional only fires when the hacked slot names nothing.
+
+**Result:** the 56 blocked Desert models now write. `ATGun37` and `88Pak43` import with
+**0 unresolved**; `Grant` gets 46 of 575 unresolved (its Desert2 coverage is 98%, not
+100%). Desert_Obj now has **319** `.RRI` files.
+
+Note the tool had to learn the same lesson as the importer: it computed `used` via
+`slots_used_by(parts)` with no availability set, so it kept reporting the phantom slot 16
+as missing and skipping models the resolver could already handle. Both sides must share
+the availability knowledge.
