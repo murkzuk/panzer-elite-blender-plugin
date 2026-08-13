@@ -541,3 +541,42 @@ importer; not the residual error.
 
 That leaves the **half-texel convention** as the leading candidate, and ObjEdit's own
 viewport scaling as the thing to rule out before trusting the comparison at all.
+
+### NEXT BUG, precisely located: the id-fallback path emits a WHOLE-ATLAS UV rect
+
+User spotted the whole texture appearing on a single gun-barrel face. Dumping the actual
+UVs for `Psw222` / `Main_Gun` in atlas pixels:
+
+```
+face 0-3   x 240..256   y 1632..1648    16x16   <- exactly the file's crop
+face 4-6   x 128..160   y 1632..1648    32x16   <- exactly the file's crop
+face 7     x   0..256   y    0..4096            <- THE ENTIRE ATLAS
+```
+
+**Faces 0-6 are pixel-perfect**, which is a strong independent check on the crop maths
+after v0.51.0. Face 7 is the outlier: its texture id **1144 is absent from the named
+library**, so it resolves through the v0.50.0 fallback - and that path produces a rect
+spanning the whole atlas instead of the fallback entry's own rectangle.
+
+Look at `build_blender_objects`:
+
+```python
+if crop:
+    crop_w, crop_h, start_x, start_y = crop[:4]
+else:
+    crop_w, crop_h, start_x, start_y = sizeX, sizeY, 0, 0   # <- defaults
+```
+
+When the entry comes from a fallback library, `posX/posY/sizeX/sizeY` are not being taken
+from THAT library's entry for the id, so the rect degenerates to the full atlas.
+
+**Why this matters beyond one face:** every model reported "0 unresolved" partly because
+the fallback always finds *something*. Those faces are counted as resolved while being
+mapped to the entire atlas - convincingly wrong rather than visibly unresolved, which is
+the failure mode this project keeps having to relearn.
+
+**Fix direction:** make the fallback carry the entry (posX, posY, sizeX, sizeY) from the
+library that actually supplied the id, exactly as the primary path does. Then re-dump
+`Main_Gun` - face 7 should collapse from 256x4096 to a real crop.
+
+Also worth auditing afterwards: how many faces install-wide currently take that path.
