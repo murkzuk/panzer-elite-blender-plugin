@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 31, 0),
+    "version": (0, 33, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -99,15 +99,27 @@ ATLAS_HEIGHT = 4096
 PE_TO_METERS_SCALE = 0.15625
 
 # From Rrattrib.h - only the common/recognizable ones, for a readable custom property.
-OBJ_TYPE_NAMES = {
-    0: "HAUS", 1: "TREE", 2: "WALL", 3: "TANK", 4: "TURM", 5: "KANNONE", 6: "MUZZLE",
-    7: "KETTENVERTEX", 8: "RADVERTEX", 9: "MG1", 10: "MG2", 11: "MG3", 12: "MG4",
-    13: "HATCH", 91: "MANTLEXA", 92: "SCHUERZEN", 93: "HSCHUERZEN", 96: "RADIO",
-    98: "PLATESTURRET", 99: "PLATESHULL", 102: "TRACKL", 103: "TRACKR", 106: "BARREL",
-    114: "CREW_DRIVER", 115: "CREW_RADIOOP", 116: "CREW_GUNNER", 117: "CREW_LOADER",
-    118: "CREW_COMMANDER", 120: "JUNK", 122: "HATCH2", 123: "CARGO",
-    127: "PINE", 128: "PINE2", 129: "PALM", 130: "SIGN", 131: "BARE",
-    135: "SOLID", 136: "SOLID_2", 255: "NULL",
+# Complete OBJ_TYPE_ set transcribed from the real Rrattrib.h - all 89 constants, where
+# an earlier hand-made table named only 37. The low byte of a part's objAttribut holds
+# this type, and it is what makes a part FUNCTION in game rather than just render: a
+# turret that is not tagged TURM is only geometry.
+OBJ_TYPE_NAMES = { 0: "HAUS", 1: "TREE", 2: "WALL", 3: "TANK", 4: "TURM", 5: "KANNONE",
+    6: "MUZZLE", 7: "KETTENVERTEX", 8: "RADVERTEX", 9: "MG1", 10: "MG2", 11: "MG3",
+    12: "MG4", 13: "HATCH", 14: "SMOKE1", 15: "SMOKE2", 16: "SMOKE3", 17: "SMOKE4",
+    18: "SMOKE5", 19: "SMOKE6", 20: "SMOKEM", 21: "DUSTH", 22: "DUSTV", 23: "VISIONAREA",
+    24: "COMMANDERPOS", 25: "BINOCULAR", 26: "SCOPESCALE", 27: "DISPNO", 28: "DISPWATER",
+    29: "DISPOEL", 30: "DISPOELPRESURE", 31: "DISPGEAR", 32: "DISPSPEED", 33: "DISPRPM",
+    34: "DISPTURM", 35: "DISP9", 36: "DISP10", 37: "DISP11", 38: "DISP12", 39: "DISP13",
+    40: "DISP14", 41: "DISP15", 42: "DISPBLACKGFX", 43: "DISPTRACK1", 44: "DISPTRACK2",
+    45: "DISPTRACK3", 46: "DISPTRACK4", 47: "DISPTRACKR1", 48: "DISPTRACKR2",
+    49: "DISPTRACKR3", 50: "DISPTRACKR4", 62: "M10X6", 63: "M10X1", 88: "DISP62",
+    89: "DISP63", 90: "DISP64", 91: "MANTLEXA", 92: "SCHUERZEN", 93: "HSCHUERZEN",
+    95: "HEDGEHOG", 96: "RADIO", 97: "WETSTORAGE", 98: "PLATESTURRET", 99: "PLATESHULL",
+    100: "UMBRELLA", 101: "COMSPRITE", 102: "TRACKL", 103: "TRACKR", 104: "MISC1",
+    105: "MISC2", 106: "BARREL", 110: "IDELER", 114: "CREW_DRIVER", 115: "CREW_RADIOOP",
+    116: "CREW_GUNNER", 117: "CREW_LOADER", 118: "CREW_COMMANDER", 120: "JUNK",
+    121: "CAMMO", 122: "HATCH2", 127: "PINE", 128: "PINE2", 129: "PALM", 130: "SIGN",
+    131: "BARE", 133: "INFTRENCH", 135: "SOLID", 136: "SOLID_2", 255: "NULL",
 }
 
 
@@ -2075,6 +2087,52 @@ PART_BOX_POS_X = 48
 PART_BOX_POS_Y = 64
 
 
+PART_OBJ_ATTRIBUT = 80   # offset of objAttribut within a 512-byte part record
+
+
+def obj_attribut_type(value):
+    """The part-type id in objAttribut's low byte."""
+    return value & 0xFF
+
+
+def obj_attribut_set_type(value, type_id):
+    """Replaces the type in objAttribut's low byte, preserving every other bit
+    (including OBJ_ATTRIB_HIDE and whatever else a real file carries there)."""
+    return (value & ~0xFF) | (type_id & 0xFF)
+
+
+def read_part_attribute(data, part_index):
+    """Reads a part's raw objAttribut word."""
+    off = HEADER_SIZE + part_index * PART_SIZE + PART_OBJ_ATTRIBUT
+    return struct.unpack_from("<I", data, off)[0]
+
+
+def patch_part_attribute(data, part_index, value):
+    """Writes a part's objAttribut word. Mutates `data` in place.
+
+    Until this existed the plugin wrote exactly one field of the 512-byte part record
+    (maxVertex) plus the collision box, so gameplay tags could be read but never set -
+    which meant a model edited in Blender could look right and still not work in game."""
+    off = HEADER_SIZE + part_index * PART_SIZE + PART_OBJ_ATTRIBUT
+    struct.pack_into("<I", data, off, value & 0xFFFFFFFF)
+
+
+def parse_obj_attribut_property(raw, fallback=0):
+    """Reads the pe_obj_attribut custom property back to an int.
+
+    Stamped at import as a hex string ("0x3") so it is readable in Blender's UI, but a
+    user may equally have typed a plain decimal, so both are accepted. Anything
+    unparseable falls back rather than corrupting the part record."""
+    if raw is None:
+        return fallback
+    if isinstance(raw, int):
+        return raw & 0xFFFFFFFF
+    try:
+        return int(str(raw).strip(), 0) & 0xFFFFFFFF
+    except (TypeError, ValueError):
+        return fallback
+
+
 def compute_part_bounding(vertices):
     """Reproduces the engine's own rrDoGenBounding() (Rrdwire.c), which is what
     ObjEdit's Bounding Box > Gen button calls.
@@ -2219,6 +2277,18 @@ def rebuild_part_mesh_region(data, part_index, new_vertices, new_faces, new_text
         old_all_vertex_sum += struct.unpack_from("<I", data, _mesh_record_offset(p, 0) + 16)[0]
     existing_headroom = max(0, maxAllVertex - old_all_vertex_sum)
 
+    # Whether the collision box is auto-generated has to be decided BEFORE the region is
+    # rewritten - afterwards the mesh record already describes the new counts, and reading
+    # the old vertices runs off the end. (Regression caught by the capacity tests.)
+    bounding_was_generated = False
+    if update_bounding:
+        try:
+            _old_verts = [read_vertex_position(data, part_index, 0, i)
+                          for i in range(old_vertexCount)]
+            bounding_was_generated = part_bounding_is_generated(data, part_index, _old_verts)
+        except (IndexError, struct.error):
+            bounding_was_generated = False
+
     old_region_start = old_faceList_off
     old_region_size = _region_size(old_faceCount, old_vertexCount)
     old_region_end = old_region_start + old_region_size
@@ -2330,11 +2400,8 @@ def rebuild_part_mesh_region(data, part_index, new_vertices, new_faces, new_text
     # stored box still matches what rrDoGenBounding() would produce for the OLD geometry:
     # object.c treats a box that does not match the model's extents as deliberate ("the
     # maker has a specific size in mind"), so a customised one is left alone.
-    if update_bounding and new_vertices:
-        old_vertices = [read_vertex_position(data, part_index, 0, i)
-                        for i in range(old_vertexCount)]
-        if part_bounding_is_generated(data, part_index, old_vertices):
-            patch_part_bounding(data, part_index, new_vertices)
+    if update_bounding and new_vertices and bounding_was_generated:
+        patch_part_bounding(data, part_index, new_vertices)
 
     # Per-part maxVertex duplicates that part's own LOD0 vertexCount - surveyed across
     # 33,023 real parts with zero mismatches, so this is an invariant, not a tendency.
@@ -3846,6 +3913,12 @@ def write_object_mesh_into_rrf(rrf_data, obj, bm, part_index):
      _vl, old_vertexNormList_off, _sl, old_attribVList_off) = struct.unpack_from(
         "<IIIIIIIII", rrf_data, mesh_off)
 
+    # Kept so the collision-box check can tell "this edit broke it" from "it was already
+    # like that" - see the bounding_stale note below.
+    rrf_data_before = rrf_data
+    old_vertices_before = [read_vertex_position(rrf_data, part_index, 0, i)
+                           for i in range(orig_vertex_count)]
+
     is_root = part_index == 0
     pivot = obj.get("pe_pivot", (0.0, 0.0, 0.0))
 
@@ -3932,14 +4005,261 @@ def write_object_mesh_into_rrf(rrf_data, obj, bm, part_index):
         new_face_normals=new_face_normals, new_vertex_normals=new_vertex_normals,
         new_face_records=new_records, new_sort_blocks=derived_sort,
     )
+    # Gameplay attributes: write back whatever the object carries, so a type changed in
+    # Blender (or via MESH_OT_pe_set_part_attribute) actually reaches the file. Only
+    # touched when the object really has the property, so an object that never had one
+    # cannot silently zero a real part's tags.
+    if "pe_obj_attribut" in obj:
+        existing = read_part_attribute(new_data, part_index)
+        wanted = parse_obj_attribut_property(obj["pe_obj_attribut"], fallback=existing)
+        if wanted != existing:
+            new_data = bytearray(new_data)
+            patch_part_attribute(new_data, part_index, wanted)
+            new_data = bytes(new_data)
+
     stats = {
         "vertices": len(new_vertices),
         "faces": len(new_faces),
         "added": len(new_faces) - len(face_orig_to_new),
         "removed": orig_face_count - len(face_orig_to_new),
-        "bounding_stale": not part_bounding_contains(new_data, part_index, new_vertices),
+        # Only flag a box this edit actually broke. Many real parts ship with a box that
+        # already fails to contain their mesh (deliberately larger or smaller collision
+        # volumes), and warning about those on every write - including a no-op one - is
+        # noise the user cannot act on and did not cause.
+        "bounding_stale": (part_bounding_contains(rrf_data_before, part_index, old_vertices_before)
+                           and not part_bounding_contains(new_data, part_index, new_vertices)),
     }
     return new_data, stats
+
+
+def validate_rrf(filepath):
+    """Checks a .RRF for the problems that have actually bitten this project, and returns
+    a list of (severity, part_index_or_None, message) - severity "ERROR" for something the
+    engine can be expected to choke on, "WARNING" for something suspicious but survivable.
+
+    Every check here corresponds to a real bug found during development, not a
+    hypothetical:
+
+    - maxAllVertex below the sum of vertex counts: Scene.c sizes the per-actor vertex
+      buffers from it (vCount = obj->maxAllVertex), so too small means the transform
+      writes past the allocation.
+    - a part's maxVertex below its own vertexCount: the same buffer is carved up per part
+      by maxVertex, so the part writes into the next part's slice.
+    - sortList blocks that are not permutations of 0..faceCount-1: the draw loop indexes
+      faces through them.
+    - faces referencing vertices past vertexCount.
+    - degenerate faces (a repeated vertex within one face): real shipped content contains
+      these, so only a warning - but they once hung this importer's normal recalculation.
+    - a collision box that does not contain its own mesh.
+    - vertex counts near the format's 16-bit per-face index limit.
+    """
+    findings = []
+    data = read_rrf_raw(filepath)
+    maxLOD, transInfo, objCount, maxAllVertex, textureStart, textureLen = struct.unpack_from(
+        "<HHIIII", data, 0)
+
+    if not (0 < objCount < 4096):
+        findings.append(("ERROR", None, "objCount is %d, which is not plausible" % objCount))
+        return findings
+
+    total_vertices = 0
+    for p in range(objCount):
+        mesh_off = _mesh_record_offset(p, 0)
+        (_mt, faceCount, faceList_off, _fnl, vertexCount,
+         _vl, _vnl, sortList_off, _avl) = struct.unpack_from("<IIIIIIIII", data, mesh_off)
+        total_vertices += vertexCount
+        part_off = HEADER_SIZE + p * PART_SIZE
+        maxVertex = struct.unpack_from("<I", data, part_off + 84)[0]
+        name = data[part_off:part_off + 12].split(b"\x00")[0].decode("latin-1", "replace")
+        label = "part %d (%s)" % (p, name or "unnamed")
+
+        if maxVertex < vertexCount:
+            findings.append(("ERROR", p, "%s: maxVertex %d < vertexCount %d - this part will "
+                                         "write past its slice of the shared vertex buffer"
+                             % (label, maxVertex, vertexCount)))
+        if vertexCount > 0xFFFF:
+            findings.append(("ERROR", p, "%s: %d vertices exceeds the 16-bit per-face vertex "
+                                         "index limit" % (label, vertexCount)))
+        elif vertexCount > 0xF000:
+            findings.append(("WARNING", p, "%s: %d vertices is close to the 65535 limit"
+                             % (label, vertexCount)))
+
+        if faceCount == 0 or vertexCount == 0:
+            continue
+
+        # sortList blocks must be permutations (the low 15 bits are the face index; bit 15
+        # is the engine's own "skip this face" flag).
+        # Two genuinely different failures here, worth separating: an entry pointing PAST
+        # faceCount makes the draw loop index outside the face array
+        # (ptrFaces[faceOrderList[faceNo]] in Rrdraw.c), while duplicates/omissions stay
+        # in bounds and merely draw some faces twice and others never. Real shipped
+        # content contains both - typically models whose faces were deleted without the
+        # sortList being fully repaired - so calling everything an ERROR would cry wolf.
+        try:
+            out_of_range = dup_blocks = 0
+            for b in range(8):
+                blk = struct.unpack_from("<%dH" % faceCount, data, sortList_off + b * faceCount * 2)
+                masked = [v & 0x7FFF for v in blk]
+                if any(v >= faceCount for v in masked):
+                    out_of_range += 1
+                elif sorted(masked) != list(range(faceCount)):
+                    dup_blocks += 1
+            if out_of_range:
+                findings.append(("ERROR", p, "%s: %d of 8 sortList blocks contain a face index past "
+                                             "faceCount %d - the draw loop reads outside the face "
+                                             "array" % (label, out_of_range, faceCount)))
+            if dup_blocks:
+                findings.append(("WARNING", p, "%s: %d of 8 sortList blocks repeat or omit faces - "
+                                               "in bounds, but some faces draw twice and others "
+                                               "never" % (label, dup_blocks)))
+        except struct.error:
+            findings.append(("ERROR", p, "%s: sortList runs past the end of the file" % label))
+
+        # face vertex indices in range, and degenerate faces
+        degenerate = 0
+        try:
+            for f in range(faceCount):
+                off = faceList_off + f * FACE_SIZE
+                v1, v2, v3, _to, th, mi = struct.unpack_from("<IIIIII", data, off)
+                idx = [v1 & 0xFFFF, v2 & 0xFFFF, v3 & 0xFFFF]
+                if mi & MAT_QUAD:
+                    idx.append(th & 0xFFFF)
+                if any(i >= vertexCount for i in idx):
+                    findings.append(("ERROR", p, "%s: face %d references a vertex past "
+                                                 "vertexCount %d" % (label, f, vertexCount)))
+                    break
+                if len(set(idx)) != len(idx):
+                    degenerate += 1
+        except struct.error:
+            findings.append(("ERROR", p, "%s: faceList runs past the end of the file" % label))
+        if degenerate:
+            findings.append(("WARNING", p, "%s: %d degenerate face(s) (a repeated vertex within "
+                                           "one face)" % (label, degenerate)))
+
+        try:
+            verts = [read_vertex_position(data, p, 0, i) for i in range(vertexCount)]
+            if not part_bounding_contains(data, p, verts):
+                findings.append(("WARNING", p, "%s: collision box does not contain its own mesh"
+                                 % label))
+        except (struct.error, IndexError):
+            pass
+
+    if maxAllVertex < total_vertices:
+        findings.insert(0, ("ERROR", None,
+                            "header maxAllVertex %d < the sum of all parts' vertexCount %d - the "
+                            "engine sizes its vertex buffers from this"
+                            % (maxAllVertex, total_vertices)))
+    if textureStart + textureLen > len(data):
+        findings.insert(0, ("ERROR", None, "textureStart+textureLen runs past the end of the file"))
+    return findings
+
+
+class MESH_OT_pe_validate_model(bpy.types.Operator):
+    """Checks the .RRF this object came from for the problems that actually break models,
+    and reports them in the Info log.
+
+    Not a general-purpose file linter - every check corresponds to a real bug found while
+    building this add-on: capacity fields (maxVertex / maxAllVertex) too small for the
+    geometry, which makes the engine write past its own buffers; sortList blocks that are
+    not valid permutations, which the draw loop indexes through; faces referencing
+    vertices that do not exist; degenerate faces; and a collision box that no longer
+    contains its mesh.
+
+    Run it after editing, before trusting a model in game - it catches in a second what
+    otherwise shows up as an access violation with no explanation."""
+
+    bl_idname = "mesh.pe_validate_model"
+    bl_label = "PE: Validate Model (.RRF)"
+    bl_options = {"REGISTER"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == "MESH" and "pe_rrf_filepath" in obj
+
+    def execute(self, context):
+        path = context.active_object["pe_rrf_filepath"]
+        try:
+            findings = validate_rrf(path)
+        except (OSError, struct.error) as e:
+            self.report({"ERROR"}, "Could not validate %s: %s" % (os.path.basename(path), e))
+            return {"CANCELLED"}
+
+        errors = [f for f in findings if f[0] == "ERROR"]
+        warnings = [f for f in findings if f[0] == "WARNING"]
+        for sev, _part, msg in findings[:40]:
+            self.report({"ERROR"} if sev == "ERROR" else {"WARNING"}, msg)
+        if not findings:
+            self.report({"INFO"}, "%s: no problems found" % os.path.basename(path))
+        else:
+            self.report({"INFO"} if not errors else {"ERROR"},
+                        "%s: %d error(s), %d warning(s)"
+                        % (os.path.basename(path), len(errors), len(warnings)))
+        return {"FINISHED"}
+
+
+class MESH_OT_pe_set_part_attribute(bpy.types.Operator):
+    """Sets this part's gameplay type and hide flag - the objAttribut word the game uses
+    to decide what a part IS, not just how it looks.
+
+    The low byte is the part type (TANK, TURM, KANNONE, MUZZLE, HATCH, the crew
+    positions, the smoke/dust emitters...) from the real Rrattrib.h set; bit 31 is the
+    hide flag. A turret that is not tagged TURM will render perfectly and still not
+    traverse, so this matters for any model expected to work in game rather than just
+    look right in a viewer.
+
+    Edits the object's pe_obj_attribut property; the value reaches the file on the next
+    write or export. Every other bit of the word is preserved - real parts carry more
+    than just the type and hide flag, and this only replaces the fields it names."""
+
+    bl_idname = "mesh.pe_set_part_attribute"
+    bl_label = "PE: Set Part Type / Attributes"
+    bl_options = {"REGISTER", "UNDO"}
+
+    part_type: EnumProperty(
+        name="Part Type",
+        description="What this part is, as far as the game is concerned",
+        items=lambda self, ctx: [
+            (str(k), "%s (%d)" % (v, k), "OBJ_TYPE_%s" % v)
+            for k, v in sorted(OBJ_TYPE_NAMES.items())
+        ],
+    )
+    hidden: BoolProperty(
+        name="Hidden",
+        description="Set OBJ_ATTRIB_HIDE (bit 31) - the part exists but is not drawn",
+        default=False,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == "MESH" and "pe_part_index" in obj
+
+    def invoke(self, context, event):
+        obj = context.active_object
+        current = parse_obj_attribut_property(obj.get("pe_obj_attribut"), 0)
+        try:
+            self.part_type = str(obj_attribut_type(current))
+        except TypeError:
+            pass
+        self.hidden = bool(current & OBJ_ATTRIB_HIDE)
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        obj = context.active_object
+        current = parse_obj_attribut_property(obj.get("pe_obj_attribut"), 0)
+        value = obj_attribut_set_type(current, int(self.part_type))
+        if self.hidden:
+            value |= OBJ_ATTRIB_HIDE
+        else:
+            value &= ~OBJ_ATTRIB_HIDE
+        value &= 0xFFFFFFFF
+        obj["pe_obj_attribut"] = hex(value)
+        obj["pe_type_name"] = OBJ_TYPE_NAMES.get(obj_attribut_type(value), "UNKNOWN")
+        self.report({"INFO"},
+                    "%s is now %s%s - write or export the model to save it to the .RRF"
+                    % (obj.name, obj["pe_type_name"], " (hidden)" if self.hidden else ""))
+        return {"FINISHED"}
 
 
 class MESH_OT_pe_write_mesh(bpy.types.Operator):
@@ -4322,6 +4642,8 @@ def menu_func_detach_face(self, context):
     self.layout.operator(MESH_OT_pe_give_private_skin.bl_idname, icon="IMAGE_PLANE")
     self.layout.operator(MESH_OT_pe_write_vertex_positions.bl_idname, icon="VERTEXSEL")
     self.layout.operator(MESH_OT_pe_delete_faces.bl_idname, icon="TRASH")
+    self.layout.operator(MESH_OT_pe_set_part_attribute.bl_idname, icon="MODIFIER")
+    self.layout.operator(MESH_OT_pe_validate_model.bl_idname, icon="CHECKMARK")
     self.layout.operator(MESH_OT_pe_write_mesh.bl_idname, icon="EXPORT")
 
 
@@ -4333,6 +4655,8 @@ def register():
     bpy.utils.register_class(MESH_OT_pe_set_face_crop)
     bpy.utils.register_class(MESH_OT_pe_flip_face_texture)
     bpy.utils.register_class(MESH_OT_pe_give_private_skin)
+    bpy.utils.register_class(MESH_OT_pe_validate_model)
+    bpy.utils.register_class(MESH_OT_pe_set_part_attribute)
     bpy.utils.register_class(MESH_OT_pe_write_mesh)
     bpy.utils.register_class(MESH_OT_pe_write_vertex_positions)
     bpy.utils.register_class(MESH_OT_pe_delete_faces)
@@ -4346,6 +4670,8 @@ def unregister():
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     bpy.utils.unregister_class(MESH_OT_pe_delete_faces)
+    bpy.utils.unregister_class(MESH_OT_pe_validate_model)
+    bpy.utils.unregister_class(MESH_OT_pe_set_part_attribute)
     bpy.utils.unregister_class(MESH_OT_pe_write_mesh)
     bpy.utils.unregister_class(MESH_OT_pe_write_vertex_positions)
     bpy.utils.unregister_class(MESH_OT_pe_give_private_skin)

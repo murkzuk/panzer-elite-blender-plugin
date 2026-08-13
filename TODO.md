@@ -4,6 +4,34 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [x] **Gameplay attributes are now writable, and there is a model validator - 2026-08-12.**
+  The two items the gap analysis ranked highest, both built and verified.
+
+  **Attributes.** `objAttribut` was imported and never written, so part type tags could be
+  read but not set - a model edited in Blender could look right and still not function.
+  Added `patch_part_attribute()`, wired into the write path, plus
+  `MESH_OT_pe_set_part_attribute` ("PE: Set Part Type / Attributes") with the type as an
+  enum and a hide checkbox. Only the named fields are replaced; every other bit of the
+  word is preserved. `OBJ_TYPE_NAMES` was also completed from the real `Rrattrib.h` -
+  **89 constants, where the hand-made table had 37**. Verified on a real PantherG part:
+  type 0 -> 4 (TURM) reached the file, other bits untouched, hide flag round-tripped as
+  `0x80000004`.
+
+  **Validator** (`validate_rrf()` + "PE: Validate Model"). Every check is a bug this
+  project actually hit: capacity fields too small for the geometry, sortList blocks
+  indexing past `faceCount`, faces referencing vertices that do not exist, degenerate
+  faces, and a collision box that no longer contains its mesh. Tested both directions -
+  105 of 150 real shipped models come back completely clean, and all four deliberately
+  damaged copies were caught.
+
+  Two things worth keeping from building it. Real shipped content genuinely contains
+  broken sortLists (2 of 150 index past `faceCount`, which is a real out-of-bounds read in
+  the draw loop; more repeat or omit faces), so the check separates "reads out of bounds"
+  from "draws some faces twice" rather than calling both an error. And the collision-box
+  warning added earlier was firing on no-op writes, because many parts ship with a box
+  that never contained their mesh - it now fires only when the edit itself breaks a box
+  that was previously intact.
+
 - [ ] **Full gap analysis against the real ObjEdit - see
   [docs/GAP_ANALYSIS.md](docs/GAP_ANALYSIS.md), compiled 2026-08-12** by enumerating all
   68 `rrobjx5.dll` exports and every ObjEdit dialog unit, then checking each against what
