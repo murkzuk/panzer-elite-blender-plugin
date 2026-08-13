@@ -508,3 +508,52 @@ Psw222 (137), PantherG (321).
 `m4a3e2` is a second confirmed case of **the importer being right where ObjEdit is not** -
 it renders as a correct M4A3E2 Jumbo, distinctive thick turret and all, from the file
 ObjEdit shows as grey-and-green patches.
+
+## SETTLED FROM SOURCE: ObjEdit ALWAYS loads from its own texture folder
+
+Every slot-1 (US Sherman) model failed in ObjEdit while every slot-0 (German) model
+rendered perfectly. Five hypotheses were tried and all five were wrong: whole-set .RRI,
+relative-vs-absolute paths, a slot gap, missing ids, and the 8-vs-32-library .RRI variant.
+
+`ImageLibUnit.pas` ends it:
+
+```pascal
+function TImageLibForm.ChangeFilename(name : string) : string;
+begin
+     nStr := 'texture';
+     for i := len downto 1 do
+          if name[i] = '\' then break;      // last backslash
+     if i = 0 then i := len + 1;
+     while i <= len do
+     begin
+          nStr := nStr + copy(name,i,1);    // append only the filename
+          i := i+1;
+     end;
+     result := nStr;                        // -> "texture\Normandy2.tlb"
+end;
+```
+
+and `OEMainUnit.pas` calls it on every name read from the .RRI:
+
+```pascal
+LibWin.LoadLib(libWin.changeFilename(string(textLibName)), i);
+```
+
+**The path in an .RRI is discarded.** Only the basename survives, re-rooted at
+`texture\`, and ObjEdit has already `chdir`'d to its own folder. So ObjEdit loads
+`<ObjEdit>\texture\<name>` no matter what the .RRI says.
+
+That is the whole explanation:
+- the .RRI **does** honour the slot index (`LoadLib(..., i)`), so slot 1 is fine;
+- `--absolute` cannot help and is pointless (harmless, since it is stripped);
+- the user's `OE_2\Texture\Normandy2.tlb` is a different REDUX edition covering only
+  **71.4%** of M3's ids, while the game's own copy covers 95.2%. German models use
+  Normandy1, whose OE_2 edition matches, which is why they looked fine.
+
+**The models, the theatre rule, the .RRI files and the importer are all correct.** To make
+ObjEdit agree, the game's `Normandy2.tlb` (and its `_8.BMP`) must be placed in ObjEdit's
+own `texture\` folder - a decision for the user, since it would displace their REDUX
+edition.
+
+`--absolute` should be considered deprecated for ObjEdit's benefit; it remains useful only
+for this importer, which does honour real paths.
