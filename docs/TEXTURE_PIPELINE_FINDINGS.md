@@ -339,3 +339,27 @@ smooth lengthwise gradient, and the casemate stripes took on the organic wavy sh
 ObjEdit shows. On the Italy Tiger the turret's red tactical number renders as a readable
 **212** where it was previously a garbled smear - the signature of an un-mirrored texture.
 No change in resolution rates (Tiger 4785/0 unresolved, Sherman 885/0).
+
+### Follow-on: the all-zero corner order is MIRRORED (v0.46.0)
+
+v0.45.0 fixed the per-face winding, but everything was still mirrored *globally* - the
+earlier probe rendered four rotations and never a reflection, so a mirror could not have
+been spotted by it.
+
+Caught by the user off a detail no aggregate test would have surfaced: the **baked-in
+shadow on the road wheels**. ObjEdit puts it at 4 o'clock; the importer put it at 8.
+A 4 o'clock shadow reflected left-right lands at 8 - a rotation cannot do that.
+
+Confirmed independently on the Italy Tiger's turret number, which reads a clean **414**
+mirrored and reversed un-mirrored. Both flipped together, so it is one global convention,
+not a per-face flag.
+
+The all-zero order is therefore `v1 = top-LEFT, v2 = top-right, v3 = bottom-right,
+v4 = bottom-left` - the horizontal mirror of the explicit-corner order, where
+`rrSetTexture()` pins `v1 = top-RIGHT`. That is not an inconsistency to "fix": the
+all-zero path stores no corners, so its default lives in `OBJHALX5.dll` (no source) and
+had to be measured.
+
+**Not yet verified for the explicit-corner path.** Both models used here are 100%
+all-zero faces, so neither exercises it. The Sherman (`M4a376HV.RRF`, 94% explicit) is
+the model to check next.

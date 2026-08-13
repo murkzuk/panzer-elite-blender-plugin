@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 45, 0),
+    "version": (0, 46, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -2963,7 +2963,25 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_f
                             crop_y = min(crop_h, sizeY - start_y)
                             x0, y0 = start_x, start_y
                             x1, y1 = start_x + crop_x - 1, start_y + crop_y - 1
-                            full_rect = [(x1, y0), (x0, y0), (x0, y1), (x1, y1)]
+                            # Corner order for a face with NO stored corner data.
+                            #
+                            # v1 = top-LEFT, v2 = top-right, v3 = bottom-right,
+                            # v4 = bottom-left. Note this is the horizontal MIRROR of the
+                            # explicit-corner order below, where rrSetTexture() pins
+                            # v1 = top-RIGHT. That is not an inconsistency to "fix": the
+                            # all-zero path stores no corners at all, so its default is a
+                            # convention living in OBJHALX5.dll, which has no source. It
+                            # had to be measured.
+                            #
+                            # Measured against ObjEdit's own render, on two models that
+                            # are 100% all-zero faces:
+                            #   - Sdkfz184 road wheels: the baked-in shadow sits at 4
+                            #     o'clock in ObjEdit. The un-mirrored order put it at 8.
+                            #   - Italy Tiger turret number: reads "414" mirrored,
+                            #     and reversed un-mirrored.
+                            # Both flipped together, which is why this is one global
+                            # convention rather than a per-face flag.
+                            full_rect = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
                             corners = full_rect[:len(corners)]
                         else:
                             # Explicit corners are NOT four literal positions - they are a
