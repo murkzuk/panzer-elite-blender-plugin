@@ -242,3 +242,44 @@ Confirmed through the real import operator: TigerL, TigerE_1 and Is2-0 now come 
 **zero** unresolved faces, where TigerL was previously documented in this file as
 resolving inconsistently (19-95%). PantherG's remaining 8 faces (0.2%) are the genuinely
 unrecoverable live-HAL-handle case described above, not this bug.
+
+---
+
+## 2026-08-13: libraries resolve by THEATRE SET, not by id-overlap scoring
+
+The user's observation cracked this: **the game renders FMMYDX12 correctly while ObjEdit
+renders the same models broken.** The model data is therefore fine - the game gets its
+library list from somewhere ObjEdit does not look, and neither did this importer.
+
+A real install's `Texture/` folder is numbered *per theatre*: `Normandy1..6.TLB`,
+`Italy1..6.TLB`, `Desert1..8.TLB`. The game loads the theatre's set **in order**, so a
+face's library slot is simply an index into it:
+
+```
+slot N  ->  <Theatre>(N+1).TLB
+```
+
+### Proof
+
+`K:\Panzer Elite\Normandy_Obj\M4a3.RRF` uses slot 1.
+
+| | library | result |
+|---|---|---|
+| auto-detect (id-overlap) | `Italy5.TLB` - scored **100%** | brown/white garbage |
+| theatre rule | `Normandy2.tlb` - scores **98%** (47/48 ids) | **a correct olive-drab Sherman** |
+
+The *lower-scoring* library is the right one. Id-overlap scoring is actively misleading
+here: many libraries share ids, so a perfect score is not evidence. Written as an `.RRI`
+naming `Normandy2`, the model renders correctly - hull, bogies, sprocket, hatches all
+right, with 38 faces (12%) still unresolved, presumably needing a second library.
+
+### Consequences
+
+- **Prefer the theatre rule over scoring** when a model sits in a `*_Obj` theatre folder
+  and no real `.RRI` exists. Scoring should be the last resort, not the default.
+- Applied blind across all theatre folders the rule resolves 62.6% of faces, but that
+  figure is dragged down by **buildings** (`NHaus*` etc.), whose libraries are not in
+  `Texture/` at all - they are presumably scenario-local. Vehicles do far better.
+- This also explains why ObjEdit looks broken on models that play fine: ObjEdit needs an
+  `.RRI`, and almost none exist. **Generating `.RRI` files from the theatre rule would fix
+  those models in ObjEdit too**, not just in Blender.
