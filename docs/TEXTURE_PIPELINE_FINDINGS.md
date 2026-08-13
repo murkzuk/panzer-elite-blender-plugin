@@ -575,8 +575,32 @@ the fallback always finds *something*. Those faces are counted as resolved while
 mapped to the entire atlas - convincingly wrong rather than visibly unresolved, which is
 the failure mode this project keeps having to relearn.
 
-**Fix direction:** make the fallback carry the entry (posX, posY, sizeX, sizeY) from the
-library that actually supplied the id, exactly as the primary path does. Then re-dump
-`Main_Gun` - face 7 should collapse from 256x4096 to a real crop.
+**The "fallback loses the entry" explanation above is NOT confirmed - and one probe
+contradicts it.** Read this before touching the code:
+
+```
+resolve_texture_id(1144, {0: UvTest})  ->  (None, None)      # i.e. UNRESOLVED
+```
+
+If id 1144 is unresolved, `build_blender_objects` should take the else-branch, count it in
+`unresolved_count` and assign the magenta PE_UNRESOLVED_TEXTURE material. But the import
+reports **0 unresolved** and the face renders the whole atlas through the normal atlas
+material. Both cannot be true, so at least one of these is wrong:
+
+- `slot_to_parts` at import time holds more libraries than the .RRI names (the "inferred
+  slot" or v0.50 id-fallback path may be adding some silently, without saying so in the
+  report); or
+- the face is skipped early (`tex_id is None` -> `continue`) and simply KEEPS Blender's
+  default UVs, which span 0..1 = the whole atlas, while still carrying the atlas material.
+
+The second would mean the bug is not in the fallback at all, but in **not neutralising
+skipped faces** - they need zeroed UVs or a non-atlas material rather than being left at
+defaults.
+
+**Do this first, before any edit:** instrument `build_blender_objects` to print, for
+Main_Gun face 7 specifically: `tex_id`, whether `corners` is None, the keys of
+`slot_to_parts`, and what `resolve_texture_id` returns. That distinguishes the two cases
+in one run. Do not fix by inference - v0.51.0 currently produces pixel-perfect UVs for
+faces 0-6 and is worth not breaking.
 
 Also worth auditing afterwards: how many faces install-wide currently take that path.
