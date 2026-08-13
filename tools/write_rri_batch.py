@@ -169,7 +169,63 @@ def main():
         if not slots:
             skipped_unresolved += 1
             continue
+        # VERIFY the rule's choice. The theatre rule is right for the overwhelming
+        # majority (836 of 950 models land at 90-100% coverage), but it is a naming
+        # convention, not a guarantee: 81 Desert models name a library holding NONE of
+        # their ids - M3Gmc asks for 40 ids and Desert2 has 0 of them, so ObjEdit loads a
+        # library with nothing in it and the model renders flat and untextured. An .RRI
+        # that names the wrong library is no better than none at all.
+        #
+        # Where the rule's pick covers little, search every .TLB on disk and use whatever
+        # actually covers the ids instead. For M3Gmc that finds M4.tlb at 57% - imperfect,
+        # but the difference between a textured model and a green silhouette.
+        need_by_slot = {}
+        for _p in parts:
+            for _t in (getattr(_p, "face_texture_id", None) or ()):
+                if _t is None:
+                    continue
+                _u, _sl, _pid = rrf.decode_texture_offset(_t)
+                need_by_slot.setdefault(_sl, set()).add(_pid)
+        _libcache = {}
+
+        def _ids(path):
+            if path not in _libcache:
+                try:
+                    _libcache[path] = set(rrf.read_tlb(path))
+                except Exception:
+                    _libcache[path] = set()
+            return _libcache[path]
+
+        repaired = []
+        for _sl, _ids_needed in need_by_slot.items():
+            chosen = slots.get(_sl)
+            cov = 0.0
+            if chosen:
+                cpath = chosen if os.path.isabs(chosen) else os.path.join(tex, os.path.basename(chosen))
+                if os.path.exists(cpath):
+                    cov = len(_ids_needed & _ids(cpath)) / float(len(_ids_needed))
+            if cov >= 0.5:
+                continue
+            best = (cov, None)
+            try:
+                for _n in sorted(os.listdir(tex)):
+                    if not _n.lower().endswith(".tlb"):
+                        continue
+                    _p2 = os.path.join(tex, _n)
+                    c = len(_ids_needed & _ids(_p2)) / float(len(_ids_needed))
+                    if c > best[0]:
+                        best = (c, _p2)
+            except OSError:
+                pass
+            if best[1]:
+                slots[_sl] = (os.path.abspath(best[1]) if args.absolute
+                              else os.path.join("texture", os.path.basename(best[1])))
+                repaired.append("slot %d %.0f%%->%.0f%% via %s"
+                                % (_sl, cov * 100, best[0] * 100, os.path.basename(best[1])))
+
         desc = ", ".join("%d=%s" % (s, os.path.basename(p)) for s, p in sorted(slots.items()))
+        if repaired:
+            desc += "   [rule overridden: %s]" % "; ".join(repaired)
         print("  %s  %-42s %s" % ("WROTE" if args.write else " ok  ", os.path.basename(m), desc))
         if args.write:
             try:

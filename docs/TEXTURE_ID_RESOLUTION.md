@@ -576,3 +576,50 @@ folder.
 **Residual, expected:** coverage is 95-98%, not 100%, so a couple of faces reference ids
 even the stock library lacks. The importer covers those with its fallback library search
 (v0.50.0); ObjEdit has no such mechanism, so a face or two may still look off there.
+
+## The theatre rule needs VERIFYING, not trusting
+
+`Desert_Obj/M3Gmc.RRF` rendered flat green. Measuring showed why: its .RRI named
+`Desert2.tlb`, which contains **0 of the model's 40 ids**. An .RRI naming the wrong
+library is no better than no .RRI at all.
+
+Auditing every generated file exposed the scale of it:
+
+| coverage of the model's ids | models |
+|---|---|
+| 90-100% | 836 |
+| 50-90% | 33 |
+| **0-25%** | **81** (all Desert) |
+
+So the rule was right for ~92% and hopeless for 81 models. It is a **naming convention,
+not a guarantee** - and it was being trusted blind.
+
+`write_rri_batch.py` now verifies its own choice: where the rule's library covers under
+50% of a slot's ids, it searches every .TLB on disk and uses whatever actually covers
+them, logging the override. Examples:
+
+```
+88Flak36   slot 0   0% -> 100%  via Desert4.TLB
+ATGun76    slot 17  0% -> 100%  via M4.tlb
+M3Gmc      slot 17  0% ->  57%  via M4.tlb
+6pdr       slot 17  0% ->  57%  via M4.tlb
+```
+
+**95 Desert models repaired.** Normandy and Italy needed none, which is consistent with
+the rule holding there and failing only where Desert's numbering diverges.
+
+After verification:
+
+| coverage | models |
+|---|---|
+| 90-100% | **894** |
+| 50-90% | 41 |
+| 25-50% | 8 |
+| 0-25% | **7** |
+
+The remaining 7 reference ids no library on disk contains - not fixable by choosing a
+different library.
+
+**Lesson: a rule derived from a naming convention should be checked against the data it
+claims to explain.** The theatre rule was a genuine discovery and remains correct for the
+overwhelming majority, but shipping it unverified silently wrote 81 useless files.
