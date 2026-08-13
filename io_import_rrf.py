@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 36, 0),
+    "version": (0, 39, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -816,6 +816,66 @@ def remap_part_library(data, part_index, old_slot, new_slot, max_id=4095, lod=0)
     return remapped, skipped
 
 
+def assign_libraries_to_slots(search_folder, parts, name_prefix=None):
+    """Works out WHICH library belongs in WHICH slot, instead of merely which libraries
+    cover the most ids.
+
+    Every face names its own library slot, so a model tells you how it is organised: group
+    its faces by slot, and for each slot pick the library that best covers that slot's own
+    set of part ids. Scoring libraries globally and then numbering them 0,1,2... by score -
+    which is what this add-on used to do without a .RRI - produces a model that is fully
+    textured with the wrong textures, because a face's slot then means nothing.
+
+    Returns ({slot: (tlb_parts, atlas_image_path, tlb_filepath)}, report_lines)."""
+    by_slot = {}
+    for part in parts:
+        for tid in (part.face_texture_id or []):
+            if tid is None:
+                continue
+            _u, slot, pid = decode_texture_offset(tid)
+            by_slot.setdefault(slot, set()).add(pid)
+    if not by_slot:
+        return {}, []
+
+    libraries = []
+    for name in sorted(os.listdir(search_folder)):
+        if not name.lower().endswith(".tlb"):
+            continue
+        if name_prefix and not name.lower().startswith(name_prefix.lower()):
+            continue
+        path = os.path.join(search_folder, name)
+        try:
+            tlb_parts = read_tlb(path)
+        except Exception:
+            continue
+        if tlb_parts:
+            libraries.append((path, tlb_parts))
+    if not libraries:
+        return {}, []
+
+    assigned, report = {}, []
+    for slot in sorted(by_slot):
+        ids = by_slot[slot]
+        best, best_hits = None, 0
+        for path, tlb_parts in libraries:
+            hits = sum(1 for i in ids if i in tlb_parts)
+            if hits > best_hits:
+                best, best_hits = (path, tlb_parts), hits
+        if best is None or not best_hits:
+            report.append("slot %d: %d id(s), no library matched" % (slot, len(ids)))
+            continue
+        path, tlb_parts = best
+        atlas = find_atlas_image(path)
+        if atlas is None:
+            report.append("slot %d: best match %s has no atlas bitmap"
+                          % (slot, os.path.basename(path)))
+            continue
+        assigned[slot] = (tlb_parts, atlas, path)
+        report.append("slot %d -> %s (%d/%d ids)"
+                      % (slot, os.path.basename(path), best_hits, len(ids)))
+    return assigned, report
+
+
 def resolve_texture_id(texture_id, slot_to_parts):
     """slot_to_parts: {key: tlb_parts_dict} (key is just a label to say which library
     matched, e.g. a .RRI slot number - it doesn't need to mean anything to this function).
@@ -858,6 +918,27 @@ def resolve_texture_id(texture_id, slot_to_parts):
     low = texture_id & 0xFFF
     if low > 2047 and (low - 2048) not in candidates:
         candidates.append(low - 2048)
+
+    # A face names its OWN library slot (bits 12-15, plus the 32-library extension), and
+    # that slot is the answer whenever a library is actually loaded there. Trying it first
+    # matters: several libraries commonly contain an entry with the same part id, and
+    # taking the first match in slot order hands the face whichever library happens to
+    # sort earliest - which is exactly how a model comes in fully textured but with the
+    # wrong textures (winter camo on a summer Tiger, red road wheels, and so on).
+    _upper, face_slot, face_part = decode_texture_offset(texture_id)
+    own = slot_to_parts.get(face_slot)
+    if own is not None:
+        entry = own.get(face_part)
+        if entry is not None:
+            return entry, face_slot
+        for candidate in candidates:
+            entry = own.get(candidate)
+            if entry is not None:
+                return entry, face_slot
+
+    # Fall back to searching every loaded library. Necessary when the real slot mapping
+    # isn't known (auto-detect without a .RRI) or the named slot's library is missing from
+    # disk - a texture from the wrong library still beats a magenta face.
     for candidate in candidates:
         for slot in sorted(slot_to_parts):
             entry = slot_to_parts[slot].get(candidate)
@@ -3027,6 +3108,31 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
                     slot_sources = None
                 else:
                     tlb_confidence = "rri"
+                    # An .RRI can be structurally incapable of naming every slot a model
+                    # uses: the 8- and 16-slot variants cannot express slots 16-31 at all,
+                    # yet real models reference them (a Tiger1 here has 289 faces in slot
+                    # 16 against a 16-slot RRI, which left 255 of them unresolved). Where
+                    # the RRI is silent about a slot the faces genuinely use, infer just
+                    # that slot from the texture folder instead of falling back to
+                    # first-match-anywhere. The RRI still wins for every slot it names.
+                    used_slots = set()
+                    for _p in parts:
+                        for _t in (_p.face_texture_id or []):
+                            if _t is not None:
+                                used_slots.add(decode_texture_offset(_t)[1])
+                    unnamed = sorted(used_slots - set(slot_sources))
+                    if unnamed:
+                        folder = default_texture_folder(self.filepath)
+                        if folder:
+                            inferred, inf_report = assign_libraries_to_slots(folder, parts)
+                            filled = []
+                            for sl in unnamed:
+                                if sl in inferred:
+                                    slot_sources[sl] = inferred[sl]
+                                    filled.append(sl)
+                            if filled:
+                                detect_msg += (" + inferred slot(s) %s the .RRI cannot name"
+                                               % ", ".join(str(x) for x in filled))
             except Exception as e:
                 self.report({"WARNING"}, f"Could not read .RRI ({e}) - falling back")
 
@@ -3042,13 +3148,32 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
                 if not matches:
                     detect_msg = f" - auto-detect{origin_note}{theatre_note} found no good TLB match among {len(unique_ids)} unique texture ID(s)"
                 else:
-                    built = {}
+                    # Assign libraries to the slots the faces actually name, rather than
+                    # numbering the score-ordered matches 0,1,2... A face's slot is
+                    # meaningless under that old numbering, so a multi-library model came
+                    # in fully textured but with textures from the wrong libraries.
+                    built, slot_report = assign_libraries_to_slots(
+                        search_folder, parts, name_prefix=name_prefix)
                     skipped_no_atlas = []
-                    for slot, (path, tlb_parts, atlas_image_path, score) in enumerate(matches):
+                    # Per-slot assignment gets each face's OWN library right, but it picks
+                    # only one library per used slot and so can cover fewer ids overall
+                    # than the score-ranked list. Keep the score-ranked matches too, parked
+                    # at spare high keys where they can never be mistaken for a real slot -
+                    # resolution tries the face's own slot first and falls back to these,
+                    # so coverage is never worse than before. (Caught by regression: Is2-0
+                    # went from 0 to 422 unresolved faces with per-slot assignment alone.)
+                    already = {id(v[0]) for v in built.values()}
+                    spare = 1000
+                    for path, tlb_parts, atlas_image_path, score in matches:
                         if atlas_image_path is None:
                             skipped_no_atlas.append(os.path.basename(path))
                             continue
-                        built[slot] = (tlb_parts, atlas_image_path, path)
+                        if any(v[2] == path for v in built.values()):
+                            continue
+                        built[spare] = (tlb_parts, atlas_image_path, path)
+                        spare += 1
+                    if slot_report:
+                        self.report({"INFO"}, "Library slots: " + "; ".join(slot_report[:8]))
                     names = ", ".join(os.path.basename(path) for path, *_ in matches)
                     detect_msg = f" - auto-detected {len(matches)} .TLB(s){origin_note}{theatre_note}: {names}"
                     if skipped_no_atlas:
