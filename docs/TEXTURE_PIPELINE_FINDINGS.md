@@ -470,3 +470,17 @@ the face, rather than at anything to do with winding or origin.
 **Next session starts here.** The test pattern makes it directly measurable: pick one face,
 read which cells it spans in each tool, and the ratio gives the answer. Do not theorise
 first - five consecutive hypotheses were wrong today before measuring settled things.
+
+### Test-pattern gotcha: never use near-white in it
+
+The first build drew its cell labels in `(250,250,250)`. That is exactly what the importer's
+colour key treats as transparent, so the labels were **keyed out** and rendered as holes
+rather than text - a self-inflicted flaw in the very tool meant to reveal flaws. Caught by
+the user ("white is transparent so choose black").
+
+The palette now has no near-white entry at all: labels are `(15,15,15)`, borders
+`(70,70,70)`, and the filler greys are capped at 200 so they cannot drift into the key.
+Verified: the closest grey sits 0.743 from white in linear space, far outside the 0.12
+threshold.
+
+Builder script: `tools/uvtest/make_uvtest.py`.
