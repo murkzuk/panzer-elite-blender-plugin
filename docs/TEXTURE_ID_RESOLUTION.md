@@ -557,3 +557,22 @@ edition.
 
 `--absolute` should be considered deprecated for ObjEdit's benefit; it remains useful only
 for this importer, which does honour real paths.
+
+### RESOLVED (user-confirmed)
+
+The game's stock `Normandy2.tlb` + `Normandy2_8.BMP` were copied into ObjEdit's own
+`texture\` folder, which is the only place it ever looks. Coverage of the US models'
+slot-1 ids there went from **71.4% to 95-98%**, and the user confirms **M4A2 and every
+other Sherman now render perfectly in ObjEdit**.
+
+The REDUX editions were backed up first to `OE_2\Texture\REDUX_Normandy2_backup\`, and
+the orphaned `Normandy2_24.bmp` was moved aside - it was artwork for the REDUX entry table
+being replaced, so leaving it would have paired REDUX artwork with a stock table.
+
+Nothing in the models, the theatre rule, the .RRI files or the importer was ever wrong.
+The whole failure was ObjEdit loading a different edition of one library from its own
+folder.
+
+**Residual, expected:** coverage is 95-98%, not 100%, so a couple of faces reference ids
+even the stock library lacks. The importer covers those with its fallback library search
+(v0.50.0); ObjEdit has no such mechanism, so a face or two may still look off there.
