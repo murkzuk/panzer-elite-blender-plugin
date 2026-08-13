@@ -461,3 +461,31 @@ Desert 318.
 
 **Recommend `--absolute` whenever ObjEdit lives outside the game folder**, which is the
 common case for a modding setup.
+
+### M3: the importer is right and ObjEdit is wrong
+
+`Normandy_Obj/M3.RRF` renders as a grey, folded mess in ObjEdit no matter what the .RRI
+says. Three hypotheses were tried and all three were WRONG:
+
+1. the whole-theatre-set .RRI making ObjEdit load bad libraries - no (fixed the
+   "Texture ID Too High!" error, M3 unchanged);
+2. relative paths loading OE_2's different edition of Normandy2 - no (absolute paths made
+   no difference);
+3. a slot gap, since the two working models use slot 0 and M3 only slot 1 - no (filling
+   slots 0 AND 1 changed nothing).
+
+Measuring instead of guessing settled it:
+
+- M3 is **125 faces, 100% textured** - the grey is not untextured geometry.
+- Its 21 ids are **20/21 present** in Normandy2 - content is not missing.
+- **The plugin imports it correctly**: a clean M3 halftrack, olive drab, white US star,
+  rivet detail, 0 unresolved.
+
+So this is an **ObjEdit-side failure on that model**, not an importer or .RRI bug. Do not
+spend more effort making ObjEdit happy with it.
+
+**Process note worth keeping.** ObjEdit was treated as ground truth throughout this
+session, which was right for the wheel shadow and the theatre rule - and wrong here. When
+the editor and the importer disagree, check whether the importer's output is independently
+plausible (a recognisable vehicle with correct markings) before assuming the importer is
+at fault. Three failed hypotheses in a row is the signal to stop and measure.
