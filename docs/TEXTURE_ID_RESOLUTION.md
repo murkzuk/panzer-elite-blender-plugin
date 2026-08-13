@@ -331,3 +331,39 @@ genuine 1999-dated `.RRI` files (`MTank.RRI`, `Spw250MG.RRI`) left untouched.
 comparing a capitalised name (`"Normandy2.tlb"`) against lowercased directory entries.
 Both times the failure was silent - the code reported success while doing nothing. When
 matching filenames on Windows, lowercase BOTH sides.
+
+## Applied across K:\Panzer Elite (2026-08-13)
+
+| folder | written | pre-existing (untouched) | skipped |
+|---|---|---|---|
+| Normandy_Obj | 259 | 2 | 1 |
+| Italy_Obj | 370 | 1 | 0 |
+| Desert_Obj | 262 | 1 | 56 |
+
+**Confirmed in ObjEdit by the user**: `Normandy_Obj/Pz3h.RRF`, which had no `.RRI` before,
+now opens fully textured. The rule is validated in the real tool, not only in Blender.
+
+## NEXT BUG, with evidence: the +2048 slot hack is wrong
+
+The 56 skipped Desert models are blocked by `decode_texture_offset()`'s "part id above
+2047 means slot+16, id-2048" rule. It yields slots that **cannot exist** - 33 models want
+slot 17, 17 want slot 16, 6 want slot 23, i.e. `Desert18/17/24`, when only Desert1-6 and 8
+are on disk. Decoding the raw fields instead (`slot = bits 12-15`, `id = bits 0-11`) gives
+slots that exist AND cover their ids:
+
+| model | hack | raw | raw coverage |
+|---|---|---|---|
+| `Grant.RRF` | slot 17 (no such library) | slot 1 -> Desert2 | **98%** |
+| `ATGun37.RRF` | slots 17, 29 (neither exists) | slot 1 -> Desert2 | **100%** |
+| `88Pak43.RRF` | slot 16 (no such library) | slot 0 -> Desert1 | **100%** |
+
+This is consistent with the earlier warning that the hack's "115,613 faces round-tripped
+with zero mismatches" evidence only ever proved decode/encode are inverses -
+reversibility, not correctness.
+
+**Do not simply delete the hack** - it was added for real 32-library content and removing
+it blind risks regressing the models it was meant to fix (TigerE_1, TigerL went 35%/71% ->
+100% resolved when it went in). The right fix is conditional: prefer the raw decode when
+the hacked slot names a library that does not exist. Re-run
+`tools/write_rri_batch.py "K:\Panzer Elite\Desert_Obj" --write` afterwards to pick up the
+remaining 56.
