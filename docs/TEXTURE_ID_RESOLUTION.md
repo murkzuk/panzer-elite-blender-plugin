@@ -312,3 +312,22 @@ skips models whose slots have no library on disk unless `--partial`.
 
 Dry run over `K:\Panzer Elite\Normandy_Obj`: **264 of 267 models would get one**, 2 already
 had one and were left alone, 1 unresolved.
+
+#### The .RRI must list the WHOLE theatre set
+
+First run of the batch writer named only the slots each model used - and made things
+*worse*. An `.RRI` is authoritative, so it disables the importer's scored fallback: the
+Normandy M4a3 went from **0 unresolved faces to 38**. All 38 wanted a single id (23) that
+`Normandy2` lacks but the rest of the Normandy set has.
+
+The game loads the theatre's libraries as a **set**, so any of them is available to a face
+at runtime. The writer now lists all of `<Theatre>1..8` that exist. Re-verified: M4a3 and
+Pz4H both back to **0 unresolved, 6/6 libraries found**.
+
+Applied to `K:\Panzer Elite\Normandy_Obj`: **259 written, 1 unresolved**, and the two
+genuine 1999-dated `.RRI` files (`MTank.RRI`, `Spw250MG.RRI`) left untouched.
+
+**Case-sensitivity, twice.** Both this tool and `theatre_set_libraries()` first failed by
+comparing a capitalised name (`"Normandy2.tlb"`) against lowercased directory entries.
+Both times the failure was silent - the code reported success while doing nothing. When
+matching filenames on Windows, lowercase BOTH sides.

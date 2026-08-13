@@ -37,6 +37,7 @@ import importlib.util
 import os
 import sys
 
+THEATRE_SET_RANGE = range(8)  # Desert goes to 8; Normandy/Italy to 6
 PLUGIN = r"L:/2025/PE/PE SOURCE/BlenderRRFPlugin/io_import_rrf.py"
 
 
@@ -120,7 +121,34 @@ def main():
                   % (os.path.basename(m), missing, theatre))
             skipped_unresolved += 1
             continue
-        slots = {s: os.path.join("texture", os.path.basename(built[s][2])) for s in built}
+
+        # List the WHOLE theatre set, not merely the slots this model happens to use.
+        #
+        # The game loads the theatre's libraries as a set, so any of them is available to
+        # a face at runtime. Naming only the used slots makes the .RRI *narrower* than
+        # reality, and because an .RRI is authoritative it then disables the importer's
+        # fallback: a real Normandy M4a3 went from 0 unresolved faces to 38 that way. All
+        # 38 wanted a single id (23) that Normandy2 lacks but the rest of the Normandy set
+        # has. Listing the set fixes it, and gives ObjEdit everything the game would have.
+        slots = {}
+        for slot_idx in range(len(THEATRE_SET_RANGE)):
+            # Compare lowercase on BOTH sides - `theatre` is capitalised ("Normandy") and
+            # real installs mix extension case (Normandy2.tlb / Normandy3.TLB).
+            wanted = ("%s%d.tlb" % (theatre, slot_idx + 1)).lower()
+            found = None
+            try:
+                for name in os.listdir(tex):
+                    if name.lower() == wanted:
+                        found = name
+                        break
+            except OSError:
+                break
+            if found:
+                slots[slot_idx] = os.path.join("texture", found)
+        # Guarantee the slots this model actually names are present even if the numbering
+        # above missed them (e.g. a slot beyond the theatre's own numbered range).
+        for s_i, entry in built.items():
+            slots.setdefault(s_i, os.path.join("texture", os.path.basename(entry[2])))
         if not slots:
             skipped_unresolved += 1
             continue
