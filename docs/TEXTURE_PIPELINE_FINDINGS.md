@@ -387,3 +387,47 @@ actually renders correctly in ObjEdit first. Models sitting in the working ObjEd
 (`OE_2`: ShermanIII, Firefly, M4A2L, the `Tiger1 PE` folder) are the trustworthy corpus;
 `CustomA/Sdkfz184.RRF` is confirmed-good in ObjEdit and is the reference model for the
 all-zero path.
+
+---
+
+## MAJOR 2026-08-13: real PE content contains NO explicit-corner faces at all
+
+The user's idea - test against michaelY's **Torch** mod, since he did only artwork and
+left the 3D models untouched - settled the corpus question outright.
+
+Scanned the whole `K:\Panzer Elite` install (Torch applied, plus the MvR and FMMY mods):
+
+| | |
+|---|---|
+| .RRF files | **1,971** |
+| textured faces | **277,230** |
+| explicit-corner | **0.0%** |
+| all-zero | **100.0%** |
+
+Not one explicit-corner face in an entire real, shipped, playable install. Every model in
+the working `OE_2` ObjEdit folder is likewise 100% all-zero, as are the two models
+confirmed good in ObjEdit (`Sdkfz184`, Italy `Tiger1`).
+
+**This retires the "69.9% of faces are explicit" figure.** That number came solely from
+the `Panzer Elite Ostpak3` tree, which the user confirms is full of models broken in
+ObjEdit itself. Explicit corners are the *newer* scheme - `rrSetTexture()` notes "now
+sending full pixel location, not 16 chunk blocks" - written by later PEx ObjEdit builds,
+and in practice they appear only on half-finished Ostpak3 models.
+
+### Consequences
+
+- **The all-zero path is THE path.** It is what every verifiable model uses, and it is the
+  one fixed in v0.43.0 / v0.45.0 / v0.46.0.
+- **The explicit path drops from "the big remaining gap" to a low-priority edge case.** It
+  still matters for anything freshly edited in PEx ObjEdit 1.05, but there is currently no
+  known-good explicit model anywhere to validate against - every one found is broken in
+  ObjEdit too. Do not spend effort there without one.
+- **`K:\Panzer Elite` is now the trustworthy corpus**, not `Panzer Elite Ostpak3`.
+
+### Still to check on the good corpus
+
+Library auto-detect remains the weak link, not the rect maths: `K:\Panzer Elite\
+Normandy_Obj\M4a3.RRF` renders wrong, and auto-detect openly reports it is guessing
+(picked `Italy5.TLB`; `Desert4.TLB` scores 98%). Wrong library, right geometry. Resolving
+libraries reliably - ideally from the game's own data rather than by id-overlap scoring -
+is the next real target.
