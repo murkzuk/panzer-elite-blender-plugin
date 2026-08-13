@@ -511,3 +511,26 @@ test render; 137 faces, 0 unresolved, no regression.
 
 Found only because the labelled UV pattern made the discrepancy visible - eyeballing
 camouflage would never have surfaced a 6% scale error.
+
+#### Residual scale error after v0.51.0 - NEXT STEP
+
+User verdict on v0.51.0: "better, not perfect". So the one-pixel span was a real error but
+not the whole of it.
+
+**Do not guess at the remainder.** Candidates, none yet tested:
+
+1. **Half-texel offset.** UVs are computed as `u = atlas_x / ATLAS_WIDTH` with the texture
+   node on `Closest`. If the engine samples texel CENTRES, every rect needs a +0.5 px
+   shift; if edges, it does not. A half-texel on a 16px crop is ~3%.
+2. **Entry origin granularity.** `posX`/`posY` are in 16px tiles and multiplied up. If the
+   engine adds a sub-tile offset the entry table also carries (`cutX`/`cutY` are read but
+   currently unused by the importer), origins would be slightly off.
+3. **ObjEdit's own viewport scaling** - the comparison baseline may not be pixel-exact.
+
+**The measurement that settles it**, using the labelled grid: pick ONE face in ObjEdit,
+note the exact cell labels at its left/right and top/bottom edges (e.g. "spans 1,44 to
+2,45"), then read the same face's UV bounds out of Blender. The two rectangles in atlas
+pixels give the residual offset and scale directly - no theorising required.
+
+`cutX`/`cutY` are the cheapest thing to check first: they are already parsed in
+`read_tlb()` and currently ignored.
