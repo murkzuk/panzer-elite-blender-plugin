@@ -431,3 +431,42 @@ Normandy_Obj\M4a3.RRF` renders wrong, and auto-detect openly reports it is guess
 (picked `Italy5.TLB`; `Desert4.TLB` scores 98%). Wrong library, right geometry. Resolving
 libraries reliably - ideally from the game's own data rather than by id-overlap scoring -
 is the next real target.
+
+---
+
+## UV TEST PATTERN (2026-08-13) - built, and what it proved
+
+`K:\uvtest\` holds `Psw222.RRF` + `.RRI` pointing at `UvTest.tlb`, whose atlas is a
+labelled **8 x 128 grid of 32px cells**, each printed with its own `column,row`. The
+entry table is a straight copy of Normandy1, so every face samples exactly where it always
+did - the artwork just makes that readable. `UvTest.tlb` + `UvTest_8.bmp` are also in
+`OE_2\Texture\` so ObjEdit can load them (it only ever reads its own folder).
+
+This is a permanent diagnostic: point any model's `.RRI` at that library and every face
+announces which atlas cell it uses, in Blender and ObjEdit alike.
+
+### PROVED: per-face mirroring is authored, not a bug
+
+Measured on Psw222: **29 faces wind positive, 112 negative** - genuinely mixed, so some
+faces are mirrored relative to others. (An earlier claim that reversed labels were merely
+"the far flank of a symmetric model" was wrong, and the user caught it: a `7,49` cell
+reads backwards on the same flank where others read correctly.)
+
+**The user confirmed those same cells read backwards in ObjEdit too.** So the importer
+reproduces the engine exactly; the artist mapped those faces with reversed winding.
+Nothing to fix - and it is independent confirmation of the v0.45 winding fix and the
+v0.46 mirrored corner order, this time against the real tool rather than inference.
+
+Note `Turret` is all-negative and `Turret_MG` all-positive, which looks like authoring
+convention rather than damage.
+
+### OPEN: cell SCALE differs between Blender and ObjEdit
+
+User observation, not yet investigated: the grid cells do not come out the same size in
+the two tools. Orientation and position agree; the **scale** does not. That points at the
+crop SIZE - `materialInfo` bits 8-15, `((nibble)+1)*16` - or at how the crop is fitted to
+the face, rather than at anything to do with winding or origin.
+
+**Next session starts here.** The test pattern makes it directly measurable: pick one face,
+read which cells it spans in each tool, and the ratio gives the answer. Do not theorise
+first - five consecutive hypotheses were wrong today before measuring settled things.
