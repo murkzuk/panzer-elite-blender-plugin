@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 29, 0),
+    "version": (0, 31, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -2065,7 +2065,112 @@ def repack_existing_face_record(orig_record, new_vertex_indices, new_corners=Non
     return struct.pack("<IIIIII", v1, v2, v3, textureOfset, textureHalf, materialInfo)
 
 
-def rebuild_part_mesh_region(data, part_index, new_vertices, new_faces, new_texture_ids, new_corners, new_attrib_v, new_material_info=None, new_face_normals=None, new_vertex_normals=None, new_face_records=None, new_sort_blocks=None):
+# Collision-box field offsets within a 512-byte part record (Object.h):
+#   name[12] @0, pivotX/Y/Z @12/16/20, boxRangeX[2] @24, boxRangeY[2] @32,
+#   boxRangeZ[2] @40, boxPosX[4] @48, boxPosY[4] @64, objAttribut @80, maxVertex @84
+PART_BOX_RANGE_X = 24
+PART_BOX_RANGE_Y = 32
+PART_BOX_RANGE_Z = 40
+PART_BOX_POS_X = 48
+PART_BOX_POS_Y = 64
+
+
+def compute_part_bounding(vertices):
+    """Reproduces the engine's own rrDoGenBounding() (Rrdwire.c), which is what
+    ObjEdit's Bounding Box > Gen button calls.
+
+    It scans the part's LOD0 vertices for min/max per axis and stores an axis-aligned
+    range per axis plus the four corners of the XY rectangle:
+
+        boxRangeX = [minX, maxX]      boxPosX[0..3] = maxX, minX, maxX, minX
+        boxRangeY = [minY, maxY]      boxPosY[0..3] = maxY, maxY, minY, minY
+        boxRangeZ = [minZ, maxZ]
+
+    boxPos is held as four points rather than an extent so the box can be ROTATED
+    independently of the mesh (rrRotateObjectBounding), with boxRange remaining the
+    axis-aligned bound. Values are in the file's own raw coordinate convention, the same
+    space as the vertex list.
+
+    Returns (range_x, range_y, range_z, pos_x, pos_y) as tuples of raw ints."""
+    if not vertices:
+        raise ValueError("cannot compute a bounding box for a part with no vertices")
+    xs = [v[0] for v in vertices]
+    ys = [v[1] for v in vertices]
+    zs = [v[2] for v in vertices]
+    min_x, max_x = float_to_fixed(min(xs)), float_to_fixed(max(xs))
+    min_y, max_y = float_to_fixed(min(ys)), float_to_fixed(max(ys))
+    min_z, max_z = float_to_fixed(min(zs)), float_to_fixed(max(zs))
+    return (
+        (min_x, max_x),
+        (min_y, max_y),
+        (min_z, max_z),
+        (max_x, min_x, max_x, min_x),
+        (max_y, max_y, min_y, min_y),
+    )
+
+
+def read_part_bounding(data, part_index):
+    """Reads a part's stored collision box back as
+    (range_x, range_y, range_z, pos_x, pos_y)."""
+    off = HEADER_SIZE + part_index * PART_SIZE
+    return (
+        struct.unpack_from("<ii", data, off + PART_BOX_RANGE_X),
+        struct.unpack_from("<ii", data, off + PART_BOX_RANGE_Y),
+        struct.unpack_from("<ii", data, off + PART_BOX_RANGE_Z),
+        struct.unpack_from("<iiii", data, off + PART_BOX_POS_X),
+        struct.unpack_from("<iiii", data, off + PART_BOX_POS_Y),
+    )
+
+
+def part_bounding_is_generated(data, part_index, vertices):
+    """True if the part's stored box is exactly what rrDoGenBounding() would produce for
+    `vertices` - i.e. it was auto-generated from the mesh and nothing has customised it.
+
+    This distinction is the engine's own, not an invention: object.c notes that if the
+    box "does not match the extents of the model, then we can assume that the maker has
+    a specific size in mind", and treats such a box as deliberate. Regenerating one of
+    those would silently discard a real authoring decision."""
+    try:
+        expected = compute_part_bounding(vertices)
+    except ValueError:
+        return False
+    return read_part_bounding(data, part_index) == expected
+
+
+def patch_part_bounding(data, part_index, vertices):
+    """Writes a freshly generated collision box for `vertices` into the part record,
+    exactly as ObjEdit's Gen button would. Mutates `data` in place."""
+    range_x, range_y, range_z, pos_x, pos_y = compute_part_bounding(vertices)
+    off = HEADER_SIZE + part_index * PART_SIZE
+    struct.pack_into("<ii", data, off + PART_BOX_RANGE_X, *range_x)
+    struct.pack_into("<ii", data, off + PART_BOX_RANGE_Y, *range_y)
+    struct.pack_into("<ii", data, off + PART_BOX_RANGE_Z, *range_z)
+    struct.pack_into("<iiii", data, off + PART_BOX_POS_X, *pos_x)
+    struct.pack_into("<iiii", data, off + PART_BOX_POS_Y, *pos_y)
+
+
+def part_bounding_contains(data, part_index, vertices):
+    """True if the part's stored collision box still encloses every vertex.
+
+    Worth checking after a geometry edit even when the box is left alone: only 32.9% of
+    real parts carry a box matching their own mesh extent (measured across 1,656 parts),
+    and neither the whole-vehicle extent nor own-plus-children explains the rest - 0% for
+    both. Those boxes were set deliberately, via ObjEdit's Gen/Rotate/MatchParent/
+    MatchMain/MatchTurret tools, so they are preserved rather than regenerated. But a
+    preserved box can then fail to contain newly added geometry, and the user should hear
+    about that instead of discovering it as odd collision in game."""
+    if not vertices:
+        return True
+    range_x, range_y, range_z, _px, _py = read_part_bounding(data, part_index)
+    for axis, (lo, hi) in enumerate((range_x, range_y, range_z)):
+        for v in vertices:
+            raw = float_to_fixed(v[axis])
+            if raw < lo or raw > hi:
+                return False
+    return True
+
+
+def rebuild_part_mesh_region(data, part_index, new_vertices, new_faces, new_texture_ids, new_corners, new_attrib_v, new_material_info=None, new_face_normals=None, new_vertex_normals=None, new_face_records=None, new_sort_blocks=None, update_bounding=True):
     """Rebuilds one part's entire LOD0 mesh-data region to reflect a new vertex/face
     count, and shifts every later part's mesh-record offsets (all 8 LOD slots, all 6
     offset fields each - real files always duplicate LOD0's fields identically across all
@@ -2218,6 +2323,18 @@ def rebuild_part_mesh_region(data, part_index, new_vertices, new_faces, new_text
             new_vertexCount, new_vertexList_off, new_vertexNormList_off,
             new_sortList_off, new_attribVList_off,
         )
+
+    # Collision box. A PEDG modder put the requirement plainly - "when you add an object
+    # to an rrf, you must also adjust the bounding box" - and a stale box no longer
+    # contains the mesh after geometry changes. But it is only regenerated when the
+    # stored box still matches what rrDoGenBounding() would produce for the OLD geometry:
+    # object.c treats a box that does not match the model's extents as deliberate ("the
+    # maker has a specific size in mind"), so a customised one is left alone.
+    if update_bounding and new_vertices:
+        old_vertices = [read_vertex_position(data, part_index, 0, i)
+                        for i in range(old_vertexCount)]
+        if part_bounding_is_generated(data, part_index, old_vertices):
+            patch_part_bounding(data, part_index, new_vertices)
 
     # Per-part maxVertex duplicates that part's own LOD0 vertexCount - surveyed across
     # 33,023 real parts with zero mismatches, so this is an invariant, not a tendency.
@@ -2979,6 +3096,7 @@ class EXPORT_OT_rrf_model(bpy.types.Operator, ExportHelper):
             return {"CANCELLED"}
 
         written, total_added, total_removed = 0, 0, 0
+        stale_boxes = []
         for obj in sorted(candidates, key=lambda o: o["pe_part_index"]):
             bm = bmesh.new()
             try:
@@ -2995,6 +3113,8 @@ class EXPORT_OT_rrf_model(bpy.types.Operator, ExportHelper):
             written += 1
             total_added += stats["added"]
             total_removed += stats["removed"]
+            if stats.get("bounding_stale"):
+                stale_boxes.append(obj.name)
 
         try:
             write_rrf_raw(self.filepath, rrf_data)
@@ -3002,6 +3122,12 @@ class EXPORT_OT_rrf_model(bpy.types.Operator, ExportHelper):
             self.report({"ERROR"}, "Could not write %s: %s" % (self.filepath, e))
             return {"CANCELLED"}
 
+        if stale_boxes:
+            self.report({"WARNING"},
+                        "%d part(s) have a custom collision box that no longer contains their "
+                        "geometry (%s) - preserved rather than overwritten. Regenerate in ObjEdit "
+                        "(Bounding Box > Gen) if the new shape should collide."
+                        % (len(stale_boxes), ", ".join(stale_boxes[:4])))
         self.report({"INFO"},
                     "Exported %d part(s) (+%d face(s) added, -%d deleted) to %s - source model "
                     "untouched" % (written, total_added, total_removed,
@@ -3811,6 +3937,7 @@ def write_object_mesh_into_rrf(rrf_data, obj, bm, part_index):
         "faces": len(new_faces),
         "added": len(new_faces) - len(face_orig_to_new),
         "removed": orig_face_count - len(face_orig_to_new),
+        "bounding_stale": not part_bounding_contains(new_data, part_index, new_vertices),
     }
     return new_data, stats
 
@@ -3900,6 +4027,11 @@ class MESH_OT_pe_write_mesh(bpy.types.Operator):
             f[f_orig] = 1
         bmesh.update_edit_mesh(mesh)
 
+        if stats.get("bounding_stale"):
+            self.report({"WARNING"},
+                        "This part has a custom collision box that no longer contains its "
+                        "geometry - it was preserved rather than overwritten. Regenerate it in "
+                        "ObjEdit (Bounding Box > Gen) if the new shape should collide.")
         self.report({"INFO"},
                     "Wrote part %d: %d vertex(es), %d face(s) (+%d new, -%d deleted) to %s"
                     % (part_index, stats["vertices"], stats["faces"], stats["added"],

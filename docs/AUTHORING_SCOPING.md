@@ -112,11 +112,31 @@ callers who explicitly want a depth-ordered guess.
 
 ## Open questions to settle before building
 
-- **`boxPos[4]` semantics.** "4 Detail Kollision Rect" per `Object.h`. `object.c`'s
-  landscape-object path compares `boxPosX[1]`/`boxPosX[0]` against the mesh extents and
-  pads `boxRange` by `0x21800`, but that branch does not run for vehicles. What a vehicle
-  needs here is unconfirmed - and ObjEdit's "match hull/turret/gun/parent" speed keys
-  suggest a convention worth reading out of `OEMainUnit.pas` rather than inventing.
+- ~~**`boxPos[4]` semantics**~~ - **RESOLVED 2026-08-12** from `rrDoGenBounding()`
+  (`Rrdwire.c`), which is what ObjEdit's Bounding Box > Gen button calls. It scans the
+  part's LOD0 vertices for min/max per axis and writes an axis-aligned range per axis
+  plus the four corners of the XY rectangle:
+
+      boxRangeX = [minX, maxX]     boxPosX[0..3] = maxX, minX, maxX, minX
+      boxRangeY = [minY, maxY]     boxPosY[0..3] = maxY, maxY, minY, minY
+      boxRangeZ = [minZ, maxZ]
+
+  `boxPos` is four points rather than an extent so the box can be rotated independently
+  of the mesh (`rrRotateObjectBounding`), with `boxRange` remaining the axis-aligned
+  bound. Implemented as `compute_part_bounding()` / `patch_part_bounding()`.
+
+  **Most real boxes are not auto-generated and must not be overwritten.** Measured across
+  1,656 real parts: only 32.9% match their own mesh extent; 0% match the whole-vehicle
+  extent and 0% match own-plus-children. The remaining 67% were set deliberately through
+  ObjEdit's Gen/Rotate/MatchParent/MatchMain/MatchTurret tools (`rrDoMatchBounding` copies
+  a box from another part with an offset), and `object.c` says as much - a box that does
+  not match the model's extents means "the maker has a specific size in mind".
+
+  So the writer regenerates a box only when it provably still matches what
+  `rrDoGenBounding()` would produce for the old geometry, and otherwise preserves it and
+  warns that it no longer contains the mesh, pointing at ObjEdit's own tool. That matches
+  the requirement a PEDG modder stated plainly - *"when you add an object to an rrf, you
+  must also adjust the bounding box"* - without silently discarding authoring decisions.
 - **`.TLB` palette block layout** (2048 bytes vs BMP's 1024) - see gap 2.
 - **`transInfo`** (bit 0 = Phong per `Object.h`) and sensible `objAttribut` defaults for
   a new vehicle part.

@@ -4,6 +4,20 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [x] **Collision box decoded and wired in - 2026-08-12.** `rrDoGenBounding()`
+  (`Rrdwire.c`), the function behind ObjEdit's Bounding Box > Gen button, scans a part's
+  LOD0 vertices and writes `boxRangeX/Y/Z` as per-axis min/max plus `boxPosX/Y[4]` as the
+  four corners of the XY rectangle (`maxX,minX,maxX,minX` / `maxY,maxY,minY,minY`) - four
+  points rather than an extent so the box can be rotated independently of the mesh.
+
+  The important part is what NOT to do. Only **32.9%** of 1,656 real parts have a box
+  matching their own mesh extent; whole-vehicle and own-plus-children both explain **0%**.
+  The other 67% were set deliberately via Gen/Rotate/MatchParent/MatchMain/MatchTurret,
+  and `object.c` treats a non-matching box as intentional ("the maker has a specific size
+  in mind"). So the writer regenerates only when the stored box provably still matches the
+  old geometry, and otherwise preserves it and warns that it no longer contains the mesh.
+  Verified on a real extrude: 88Pak43 part 0 has a hand-set box, and the warning fired.
+
 - [x] **`.RRI` writer, palette sourcing, and the sortList question - all resolved
   2026-08-12 by actually reading ObjEdit's and the engine's source rather than inferring
   from file data.** Three things came out of it, two of them corrections to this repo's
