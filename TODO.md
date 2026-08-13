@@ -4,6 +4,27 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [ ] **START HERE on texture work: [docs/TEXTURE_PIPELINE_FINDINGS.md](docs/TEXTURE_PIPELINE_FINDINGS.md)**
+  consolidates everything established about the texture pipeline as of 2026-08-13, split
+  into settled (with the source function or sample size behind each fact) and open. Read
+  it before re-deriving anything.
+
+  Settled and shipped: the texture-id encoding including the 32-library extension
+  (Tigers 35%->100% resolved), slot-correct library selection, atlas/entry geometry, the
+  three .TLB size variants, and the .TLB palette layout.
+
+  **Open: how a face's texture coordinates are derived.** Every face on the Italy Tiger
+  has zero corner bytes and near-zero attribVList, 4,256 faces share two entries, and the
+  obvious crop reading predicts atlas regions outside the entry itself (13-22% fit). The
+  renderer computes tu/tv inside OBJHALX5.dll, whose source is in none of the archives.
+
+  **Next action**: the checkerboard experiment is already built -
+  `Italy_Obj/Tiger1_ChkTest.RRF` + `.RRI` with `Texture/ChkTest.TLB`/`ChkTest_8.BMP` (a
+  real entry table over a labelled 32px grid). It loaded untextured on the first try
+  because ObjEdit `chdir(maindir)`s before resolving the .RRI, so `texture\ChkTest.TLB`
+  resolved against ObjEdit's own folder. Fix by placing the library where ObjEdit looks or
+  using an absolute path in the .RRI, then read the grid labels off a face.
+
 - [ ] **UNSOLVED: how face texture coordinates are actually derived.** The "jumbled
   textures" symptom is NOT fixed, and the crop-rectangle model previously recorded in
   RRF_FORMAT.md is now known to be wrong. Written up in full there; the short version:
