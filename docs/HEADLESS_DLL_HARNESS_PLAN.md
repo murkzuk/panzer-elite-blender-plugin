@@ -1,6 +1,15 @@
 # Plan: query the real engine headlessly for ground-truth face UVs
 
-**Status: planned, not built (2026-08-13).** User's idea, sharpened after checking
+**Status: BUILT AND WORKING (2026-08-13).** See `tools/headless_oracle/`. Every risk
+listed below turned out to be surmountable: `rrInitRender()` initialises headless and
+pulls in `OBJHALX5.DLL` by itself, no window or HDC needed, and `rrnop.dll` was never
+required. It has already settled one long-standing question - see the crop-origin update
+in `TEXTURE_PIPELINE_FINDINGS.md`. Two corrections to the plan as written: the exported
+`rrGetUsedSelection` takes `uvFace` as its **3rd** argument, not its 5th (the internal
+`rrUsedSelection` differs), and `Setting.HAL` is absent from the OE_2 folder yet the HAL
+still loads - the shipped `rrobjx5.dll` is not built from the `rrobjpex` source tree.
+
+Original plan follows. User's idea, sharpened after checking
 feasibility. Goal: stop guessing how a face's texture rectangle is derived, and stop
 needing manual ObjEdit loads (slow to drive) to find out.
 

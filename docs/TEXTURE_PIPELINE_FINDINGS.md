@@ -159,3 +159,68 @@ entries whose `posX/posY` place them elsewhere in the atlas.
 
 The all-zero fallback (the Italy Tiger) is unchanged and still unexplained - see the
 open section above.
+
+---
+
+## UPDATE 2026-08-13 (later): the crop origin was being read from the wrong bits
+
+Settled by calling the real engine headlessly (`tools/headless_oracle`) rather than by
+inference. This supersedes the "OPEN - how a face's texture coordinates are derived"
+section above for the all-zero-corner case.
+
+### The stored layout
+
+A face's `textureOfset` is written by `rrSetTextureSelection()` as
+
+```c
+texture = rrTextLibPartIDHALStarts[i] | (orgY<<28) | (orgX<<24);
+```
+
+and read back by `rrGetSelection()` as
+
+```c
+xOfset = (textureOfset>>24)&0xf;
+yOfset = (textureOfset>>28)&0xf;
+```
+
+so the crop origin is at **bits 24-27 (X) and 28-31 (Y)**, in 16px units - *not* bits
+16-23. Bits 16-23 are high bits of the texture id.
+
+**Bit 31 is the "is textured" flag**, so only bits 28-30 actually carry Y. The engine's
+own `>>28 & 0xf` swallows that flag and reports a bogus `yOfset` of 8 for every textured
+face. Harmless inside ObjEdit; must not be copied.
+
+### Where the old reading came from
+
+`rrUsedSelection()`'s all-zero branch really does read `((TexInfo>>20)&0xf)*16`. But
+`TexInfo` there is the **selection query word built by ObjEdit's UI**, not the face's
+stored `textureOfset`. Two different packings; this project conflated them. The same
+conflation made the v0.42.0 explicit-corner comment cite the wrong variant (the code was
+right, because `_corner_xy()` already applies the `>>16`/`>>24` shift).
+
+### Measured
+
+On models with a real `.RRI` (so libraries resolve to the correct slot, not a merged
+all-libraries dict), across 10,614 all-zero-corner faces:
+
+| reading | crop lands inside its own entry | invents a non-zero origin |
+|---|---|---|
+| bits 24-27 X / 28-30 Y (correct) | **99.9%** | 0.0% |
+| bits 16-23 (what the importer did) | 74.7% | **51.3%** |
+| bits 24-31 raw, flag not masked | 28.1% | 100.0% |
+
+Fixed in v0.43.0.
+
+**Caveat, stated honestly:** on this sample the correct reading yields origin (0,0) for
+every face, so it ties exactly with a hardcoded (0,0) and does **not** independently
+prove the X nibble's position. What it does prove is that the old reading was fabricating
+offsets on half of all faces. A model that genuinely uses a non-zero crop origin is still
+wanted as a confirming case.
+
+### Also corrected
+
+The texture id decode was re-tested against the same ground truth. A 24-bit
+`id = textureOfset & 0xFFFFFF` reading resolves only 13.6% of faces; the existing
+bits 0-11 + slot bits 12-15 decode resolves 52.0%. **The existing decode stays.** Note
+that its earlier "verified by round-tripping 115,613 faces with zero mismatches" evidence
+showed only that decode/encode are inverses - reversibility, not correctness.

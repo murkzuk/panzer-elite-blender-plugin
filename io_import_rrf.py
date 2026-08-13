@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 42, 0),
+    "version": (0, 43, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -1647,18 +1647,30 @@ def _read_mesh_lod0(data, mesh_off):
             # FSizeX=(((materialInfo&0xf00)>>8)+1)*16, FSizeY=(((materialInfo&0xf000)>>12)+1)*16.
             crop_size_x = (((materialInfo & 0x0F00) >> 8) + 1) * 16
             crop_size_y = (((materialInfo & 0xF000) >> 12) + 1) * 16
-            # ...and where inside the entry that crop STARTS. This lives in
-            # textureOfset bits 16-23, in 16px units, and had been assumed to be (0,0)
-            # for every face - see rrUsedSelection() (Rrdwire.c), whose all-zero-corner
-            # branch reads exactly:
+            # ...and where inside the entry that crop STARTS, in 16px units.
+            #
+            # This used to read bits 16-23, citing rrUsedSelection()'s all-zero branch
             #     StartX = ((TexInfo>>20)&0xf)*16;  StartY = ((TexInfo>>16)&0xf)*16;
-            # Getting this wrong is invisible when each face has its own entry, and
-            # catastrophic when many faces share one: they all sampled the same top-left
-            # corner of a large shared sheet at different sizes, which is what produced
-            # the overlapping-patchwork look on real vehicles. A real Tiger has 4,256 of
-            # its 4,785 faces sharing just two entries.
-            crop_start_x = ((textureOfset >> 20) & 0xF) * 16
-            crop_start_y = ((textureOfset >> 16) & 0xF) * 16
+            # but that conflates two different packings. TexInfo there is the SELECTION
+            # QUERY word built by ObjEdit's UI, not the face's stored textureOfset. The
+            # stored field is written by rrSetTextureSelection() as
+            #     texture = rrTextLibPartIDHALStarts[i] | (orgY<<28) | (orgX<<24)
+            # and read back by rrGetSelection() as
+            #     xOfset = (textureOfset>>24)&0xf;  yOfset = (textureOfset>>28)&0xf
+            # i.e. bits 24-27 and 28-31 - confirmed live against the real engine, by
+            # calling rrGetMaterialSelection() through rrobjx5.dll on a loaded model and
+            # matching its answer to the file bytes (tools/headless_oracle).
+            #
+            # Bit 31 is the "is textured" flag, so only bits 28-30 carry Y - the engine's
+            # own >>28 & 0xf swallows the flag and reports a bogus yOfset of 8 on every
+            # textured face, which is harmless there but must not be copied here.
+            #
+            # Measured on models with a real .RRI (10,614 all-zero-corner faces): the old
+            # bits-16-23 reading invented a non-zero origin on 51.3% of faces and put the
+            # crop inside its own TLB entry only 74.7% of the time; this reading fits
+            # 99.9%. Bits 16-23 are in fact high bits of the texture id, not an origin.
+            crop_start_x = ((textureOfset >> 24) & 0xF) * 16
+            crop_start_y = ((textureOfset >> 28) & 0x7) * 16
             face_crop_size.append((crop_size_x, crop_size_y, crop_start_x, crop_start_y))
         else:
             face_texture_id.append(None)
@@ -2935,10 +2947,20 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_f
                             corners = full_rect[:len(corners)]
                         else:
                             # Explicit corners are NOT four literal positions - they are a
-                            # mix of origin and SIZE. rrUsedSelection() (Rrdwire.c) reads:
-                            #   StartX = v3 & 0xFF          SizeX = v1 & 0xFF
-                            #   StartY = (v1 & 0xFF00) >> 8 SizeY = (v3 & 0xFF00) >> 8
-                            # each incremented when non-zero, matching how rrSetTexture()
+                            # mix of origin and SIZE, written by rrSetTexture() (Rrdwire.c)
+                            # into the UPPER 16 bits of each field, the low 16 being the
+                            # vertex index:
+                            #   v1 = idx | (yStart<<24) | (xSize <<16)
+                            #   v2 = idx | (yStart<<24) | (xStart<<16)
+                            #   v3 = idx | (ySize <<24) | (xStart<<16)
+                            #   textureHalf = idx | (ySize<<24) | (xSize<<16)   [quads]
+                            # rrUsedSelection() reads these back as v1 & 0xFF etc. only
+                            # because its uvFace argument is already the >>16 form (see
+                            # rrGetSelection: uvFace->v1 = viewF[v].v1 >> 16) - do not
+                            # read the file's low bytes, which are vertex indices.
+                            # _corner_xy() applies that >>16/>>24 shift, so the indices
+                            # below land on the right values.
+                            # Each is incremented when non-zero, matching how rrSetTexture()
                             # writes them (xStart = X-1, xSize = sx-1). Treating v1.x as a
                             # right-edge coordinate - which this importer did - puts the
                             # crop in the wrong place for every face that carries real
