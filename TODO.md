@@ -4,6 +4,29 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [ ] **NEXT: headless DLL harness for ground-truth face UVs - see
+  [docs/HEADLESS_DLL_HARNESS_PLAN.md](docs/HEADLESS_DLL_HARNESS_PLAN.md).** User's idea
+  (2026-08-13), feasibility checked and it is real.
+
+  `rrobjx5.dll` in the OE_2 folder **exports the very function this project has been
+  reverse-engineering**: `_rrGetUsedSelection@20`, plus `_rrLoadGameMesh@4`,
+  `_rrSetupTextureLib@8`, `_rrSendTexturePart@32`, `_rrSendTexturePal@12`,
+  `_rrInitRender@0`. (A naive name search says "not exported" - the names carry a leading
+  underscore and `@N` stdcall decoration.) Calling it per face makes the engine state its
+  own texture rectangle numerically, for thousands of faces in seconds, with no GUI.
+
+  **Blocker**: every one of those DLLs is 32-bit x86 and every Python here is 64-bit, so
+  it needs a 32-bit Python (install to K:, never C:). `rrnop.dll` (710KB, same folder) is
+  almost certainly a no-op HAL for headless init.
+
+  Worth it beyond this bug: it turns "load in ObjEdit and squint" into a repeatable
+  numerical oracle, and takes ObjEdit - which is slow to drive - off the critical path.
+
+  Cheaper fallback if that stalls: the checkerboard test is already built
+  (`Italy_Obj/Tiger1_ChkTest.RRF`); it only failed because ObjEdit `chdir(maindir)`s
+  before resolving the `.RRI`, so put the library in OE_2's Texture folder or use an
+  absolute path.
+
 - [ ] **START HERE on texture work: [docs/TEXTURE_PIPELINE_FINDINGS.md](docs/TEXTURE_PIPELINE_FINDINGS.md)**
   consolidates everything established about the texture pipeline as of 2026-08-13, split
   into settled (with the source function or sample size behind each fact) and open. Read
