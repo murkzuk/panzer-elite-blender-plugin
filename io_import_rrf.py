@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 26, 0),
+    "version": (0, 28, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -241,7 +241,72 @@ def read_tlb_library(filepath):
     return library
 
 
-def new_tlb_library():
+# The .TLB palette block is 2048 bytes at offset 8, but only the first 1024 carry data:
+# 256 entries of 4 bytes, and the remaining 1024 are zero in every real library checked
+# (20/20). Byte order is [R, G, B, 0] - the REVERSE of a BMP palette's [B, G, R, 0].
+# Both facts come from the engine itself: rrSendTexturePal() takes 256*4 bytes and
+# unpacks them as red = (uint8)pal[i], green = pal[i]>>8, blue = pal[i]>>16, and a real
+# Normandy1.TLB/BMP pair matches entry for entry under that swap.
+TLB_PALETTE_SIZE = 2048
+TLB_PALETTE_ENTRIES = 256
+
+
+def read_tlb_palette(tlb_filepath):
+    """Returns a real .TLB's raw 2048-byte palette block, ready to hand to
+    new_tlb_library(). The cheapest correct way to give a new library real colours is to
+    copy one from a library of the theatre the model belongs to."""
+    with open(tlb_filepath, "rb") as f:
+        f.seek(8)
+        block = f.read(TLB_PALETTE_SIZE)
+    if len(block) != TLB_PALETTE_SIZE:
+        raise ValueError("%s is too short to contain a palette block" % tlb_filepath)
+    return block
+
+
+def tlb_palette_to_rgb(block):
+    """Unpacks a .TLB palette block into 256 (R, G, B) tuples - the same shape
+    read_bmp8_palette() returns, so either can feed quantize_to_palette()."""
+    return [(block[i * 4], block[i * 4 + 1], block[i * 4 + 2]) for i in range(TLB_PALETTE_ENTRIES)]
+
+
+def rgb_to_tlb_palette(rgb_entries):
+    """Packs 256 (R, G, B) tuples into a .TLB palette block: [R,G,B,0] per entry, then
+    1024 zero bytes of padding to fill the block, matching every real library."""
+    out = bytearray()
+    for i in range(TLB_PALETTE_ENTRIES):
+        r, g, b = rgb_entries[i] if i < len(rgb_entries) else (0, 0, 0)
+        out += bytes((r & 0xFF, g & 0xFF, b & 0xFF, 0))
+    out += bytes(TLB_PALETTE_SIZE - len(out))
+    return bytes(out)
+
+
+def find_theatre_palette(texture_folder, theatre_prefix=None):
+    """Finds a real .TLB to borrow a palette from, preferring the given theatre prefix
+    ("Normandy", "Desert", "Italy", "CustomA"...). Returns (palette_block, source_path),
+    or (None, None) if the folder holds no readable library.
+
+    A brand-new library has no palette of its own, and the game reads paletted 8-bit
+    bitmaps - so painting into one with an all-zero (black) palette produces a black
+    texture no matter what colours were painted. Borrowing from the model's own theatre
+    also keeps a repaint looking native next to stock vehicles."""
+    if not texture_folder or not os.path.isdir(texture_folder):
+        return None, None
+    names = [n for n in os.listdir(texture_folder) if n.lower().endswith(".tlb")]
+    if theatre_prefix:
+        preferred = [n for n in names if n.lower().startswith(theatre_prefix.lower())]
+        names = preferred + [n for n in names if n not in preferred]
+    for name in names:
+        path = os.path.join(texture_folder, name)
+        try:
+            block = read_tlb_palette(path)
+        except (OSError, ValueError):
+            continue
+        if any(block):          # skip any library that is itself all-zero
+            return block, path
+    return None, None
+
+
+def new_tlb_library(palette=None):
     """A blank TLBLibrary for building a .TLB from scratch (no existing file to base it
     on) - zero-filled palette/mat_pal/parts-array baseline, id counter starting at 0, no
     entries. Real .TLB files always have SOME palette data, but this project has no
@@ -250,7 +315,11 @@ def new_tlb_library():
     library's palette looks like."""
     library = TLBLibrary()
     library.lib_next_id = 0
-    library.palette = bytes(2048)
+    # A zero palette is not a neutral default - the game reads 8-bit paletted bitmaps,
+    # so an all-zero palette renders every painted pixel black regardless of what was
+    # painted. Callers should pass a real one (read_tlb_palette / find_theatre_palette);
+    # zeros remain only as the last-resort fallback when no library can be read at all.
+    library.palette = bytes(TLB_PALETTE_SIZE) if palette is None else bytes(palette)
     library.mat_pal = bytes(256)
     library.entries = []
     library._raw_parts_baseline = bytes(TLB_MAX_PARTS * TLB_ENTRY_SIZE)
@@ -1061,27 +1130,138 @@ def find_matching_tlbs(folder, unique_texture_ids, min_ratio=0.15, min_absolute=
     return result, confidence, reason
 
 
+# .RRI layout, taken from ObjEdit's own save code (OEMainUnit.pas SaveObject1Click) and
+# confirmed byte-for-byte against real files. Six blocks, in this order:
+#   1. library name slots   - RRI_LIB_SLOTS x 128 bytes, null-padded ASCII
+#   2. groupNameList        - RRI_GROUPS x 80 bytes
+#   3. selGroupArray        - RRI_GROUPS x RRI_SEL_PER_GROUP x 16 (4 x int32 TSelectInfo)
+#   4. selGroupArrayCount   - RRI_GROUPS x int32
+#   5. matList              - 32 x (80-byte name + int32 info + int32 col)
+#   6. attribList           - 32 x (80-byte name + int32 info + int32 value)
+#
+# Three variants ship in real installs, distinguishable purely by file size - the whole
+# arithmetic below was checked against every .RRI on a real install and accounts for
+# every byte:
+#   214,144 =  8 libs, 32 groups,  400 sel/group   (oldest)
+#   267,040 = 16 libs, 40 groups,  400 sel/group
+#   668,448 = 32 libs, 40 groups, 1024 sel/group   (current ObjEdit build - what we write)
+# Reading the wrong variant's slot count is not harmless: in the 8- and 16-slot files the
+# bytes immediately after the libraries are GROUP NAMES, which a 32-slot read happily
+# returns as if they were library paths (e.g. "PantherGa", "Name 16").
+RRI_LIB_SLOTS = 32
+RRI_GROUPS = 40
+RRI_SEL_PER_GROUP = 1024
+RRI_VARIANTS = {
+    214144: (8, 32, 400),
+    267040: (16, 40, 400),
+    668448: (32, 40, 1024),
+}
+
+# Default block contents, read out of a real ObjEdit-written .RRI. The material `info`
+# values are the same shading/texture-mode bits that appear in a face's materialInfo.
+RRI_DEFAULT_MATERIALS = [
+    ("** No Shading **", 0), ("No Single Texture", 8), ("No Two Texture", 40),
+    ("No Single Mask Testure", 12), ("No Two Mask Texture", 44), (" ", 40),
+    ("** Flat Shading **", 0), ("Flat Single Texture", 9), ("Flat Two Texture", 41),
+    ("Flat Single Mask Texture", 13), ("Flat Two Mask Texture", 45), (" ", 0),
+    ("** Phong Shading **", 0), ("Phong Single Texture", 10), ("Phong Two Texture", 42),
+    ("Phong Single Mask Texture", 14), ("Phong Two Mask Texture", 46), (" ", 0),
+    ("** Wireframe **", 0), ("Wireframe Single", 3), ("Wireframe Two Sided", 35), (" ", 0),
+] + [("Material %d" % i, 0) for i in range(22, 32)]
+
+
+def rri_variant_for_size(size):
+    """Returns (lib_slots, groups, sel_per_group) for a real .RRI file size, or None if
+    the size is not one of the three known variants."""
+    return RRI_VARIANTS.get(size)
+
+
+def write_rri(filepath, slots, lib_slots=None, groups=None, sel_per_group=None):
+    """Writes a .RRI sidecar naming which .TLB is loaded in each library slot.
+
+    `slots` is {slot_index: "texture\\Whatever.TLB"} - the same shape read_rri()
+    returns. Everything else is written as ObjEdit's own defaults: group names
+    "Not Used N", an all-zero selection array and counts, the stock material table, and
+    "Attribut N" entries. Verified byte-identical to a real ObjEdit-written file when
+    given that file's own slots.
+
+    Defaults to the current build's 32-slot/668,448-byte variant, which is what a modern
+    ObjEdit writes and expects. Why this matters: without a matching .RRI, ObjEdit warns
+    "No RRI file found, No auto load of textures!" and loads the model with no textures
+    at all - and it derives the path by swapping the .RRF name's last character for "I"
+    (convNameRRF_To_RRI), so the file has to sit beside the .RRF under the same stem."""
+    lib_slots = RRI_LIB_SLOTS if lib_slots is None else lib_slots
+    groups = RRI_GROUPS if groups is None else groups
+    sel_per_group = RRI_SEL_PER_GROUP if sel_per_group is None else sel_per_group
+
+    out = bytearray()
+    for i in range(lib_slots):
+        name = slots.get(i, "")
+        raw = name.encode("latin-1", "replace")[:127]
+        out += raw + bytes(128 - len(raw))
+    for g in range(groups):
+        raw = ("Not Used %d" % g).encode("latin-1")[:79]
+        out += raw + bytes(80 - len(raw))
+    out += bytes(groups * sel_per_group * 16)   # selGroupArray - all zero in real files
+    out += bytes(groups * 4)                    # selGroupArrayCount
+    for name, info in RRI_DEFAULT_MATERIALS[:32]:
+        raw = name.encode("latin-1")[:79]
+        out += raw + bytes(80 - len(raw)) + struct.pack("<ii", info, 0)
+    for a in range(32):
+        raw = ("Attribut %d" % a).encode("latin-1")[:79]
+        out += raw + bytes(80 - len(raw)) + struct.pack("<ii", 0, 0)
+
+    with open(filepath, "wb") as f:
+        f.write(bytes(out))
+    return len(out)
+
+
+def rri_path_for_rrf(rrf_filepath):
+    """The .RRI path ObjEdit itself would use: the .RRF path with its final character
+    replaced by "I" (convNameRRF_To_RRI in OEMainUnit.pas). Deliberately mirrors that
+    rather than doing a tidier extension swap, so a file written here is found by the
+    real tool."""
+    return rrf_filepath[:-1] + ("I" if rrf_filepath[-1].isupper() else "i")
+
+
 def read_rri(filepath):
-    """Parses the sidecar .RRI file a later ObjEdit build (Alan's export) writes next to a
-    .RRF with the same base name. First 16*128 bytes are null-padded ASCII strings, one per
-    library slot (0-15), naming the .TLB loaded into that slot when the model was painted -
-    e.g. "texture\\CustomB1.TLB". This is the authoritative slot->library mapping (confirmed
-    against a real model: slot assignments here matched exactly what a live paint-and-save
-    test in the real ObjEdit produced). Empty slots are blank strings. Only 16 of the 32
-    possible slots are recorded (slots 16-31 use a different composition scheme per
-    ImageLibUnit.pas and aren't covered by this file format).
+    """Parses the .RRI sidecar ObjEdit writes next to a .RRF with the same stem, naming
+    the .TLB loaded into each library slot when the model was painted. This is the
+    authoritative slot->library mapping (confirmed against a real model: the slots here
+    matched exactly what a live paint-and-save in the real ObjEdit produced).
+
+    The number of library slots depends on which ObjEdit build wrote the file and is
+    detected from its size (see RRI_VARIANTS). An earlier version of this function always
+    read 16 slots and documented slots 16-31 as "not covered by this file format" - both
+    wrong: the current build stores 32, and the older 8-slot files put GROUP NAMES
+    directly after the libraries, so a fixed 16-slot read returns things like "Spw250sMG"
+    and "Name 8" as if they were library paths.
+
     Returns {slot_index: relative_path_string} for the non-empty slots.
     """
+    size = os.path.getsize(filepath)
+    variant = rri_variant_for_size(size)
+    if variant is None:
+        # Unknown build - fall back to the most conservative slot count and only accept
+        # entries that actually look like library paths, rather than guessing wider.
+        lib_slots, strict = 8, True
+    else:
+        lib_slots, _groups, _sel = variant
+        strict = False
+
     with open(filepath, "rb") as f:
-        data = f.read(16 * 128)
+        data = f.read(lib_slots * 128)
 
     slots = {}
-    for slot in range(16):
+    for slot in range(lib_slots):
         off = slot * 128
         raw = data[off:off + 128].split(b"\x00", 1)[0]
         text = raw.decode("latin-1", errors="replace").strip()
-        if text:
-            slots[slot] = text
+        if not text:
+            continue
+        if strict and ".tlb" not in text.lower():
+            continue
+        slots[slot] = text
     return slots
 
 
@@ -3424,10 +3604,28 @@ class MESH_OT_pe_give_private_skin(bpy.types.Operator):
                         palette = None
                     if palette:
                         break
+        # No source BMP to borrow from (a part whose faces were never resolved, or a
+        # freshly built one). Fall back to a real library's palette from the model's own
+        # texture folder rather than greyscale - a greyscale palette makes every painted
+        # colour come out grey in game, since the game reads the paletted 8-bit bitmap.
+        palette_block = None
         if palette is None:
-            palette = [(i, i, i) for i in range(256)]  # grayscale fallback, no real source found
+            texture_folder = default_texture_folder(rrf_filepath)
+            palette_block, pal_src = find_theatre_palette(texture_folder)
+            if palette_block is not None:
+                palette = tlb_palette_to_rgb(palette_block)
+                self.report({"INFO"}, "Borrowed a palette from " + os.path.basename(pal_src))
+            else:
+                palette = [(i, i, i) for i in range(256)]
+                self.report({"WARNING"}, "No real palette found in the texture folder - falling "
+                                         "back to greyscale, so painted colours will not survive")
+        if palette_block is None:
+            palette_block = rgb_to_tlb_palette(palette)
 
-        library = new_tlb_library()
+        # Give the new library the same palette as the bitmap beside it. Previously this
+        # was left as 2048 zero bytes, so every private-skin .TLB shipped with an
+        # all-black palette that disagreed with its own _8.BMP.
+        library = new_tlb_library(palette=palette_block)
         try:
             updated = apply_private_skin(rrf_data, part_index, bm, uv_layer, plans, library)
         except ValueError as e:

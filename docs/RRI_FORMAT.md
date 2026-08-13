@@ -98,3 +98,51 @@ Not fully decoded — appears to be a part-name reference table (matching the `.
 part names, presumably for an editor UI part list) followed by a large binary section
 and a small table of human-readable shading-mode labels near the end of the file. None
 of this was needed to solve texture resolution, so it wasn't pursued further.
+
+## Full layout (corrected 2026-08-12 from ObjEdit's own source)
+
+Earlier revisions of this document described only the first block and stated that the
+file held 16 library slots. Both were incomplete. ObjEdit's `SaveObject1Click`
+(`OEMainUnit.pas`) writes **six** blocks, and the slot count varies by build:
+
+| # | Block | Size |
+|---|---|---|
+| 1 | library name slots | `libs` x 128 bytes, null-padded ASCII |
+| 2 | `groupNameList` | `groups` x 80 bytes |
+| 3 | `selGroupArray` | `groups` x `sel` x 16 (4 x int32 `TSelectInfo`) |
+| 4 | `selGroupArrayCount` | `groups` x int32 |
+| 5 | `matList` | 32 x (80-byte name + int32 info + int32 col) |
+| 6 | `attribList` | 32 x (80-byte name + int32 info + int32 value) |
+
+Three variants ship in real installs, identifiable purely by file size - the arithmetic
+accounts for every byte, verified against every `.RRI` on a real install:
+
+| Size | libs | groups | sel/group |
+|---|---|---|---|
+| 214,144 | 8 | 32 | 400 |
+| 267,040 | 16 | 40 | 400 |
+| 668,448 | 32 | 40 | 1024 |
+
+**Reading the wrong variant's slot count is not harmless.** In the 8- and 16-slot files
+the bytes immediately after the libraries are *group names*, so a fixed 32-slot read
+returns entries like `PantherGa`, `Gun` and `Name 16` as though they were library paths.
+
+### Writing one
+
+`write_rri()` produces the 32-slot variant (what a current ObjEdit writes and expects),
+filling blocks 2-6 with ObjEdit's own defaults: group names `Not Used N`, an all-zero
+selection array and counts, the stock 32-entry material table, and `Attribut N` entries.
+Every field a reader consumes matches a real ObjEdit-written file exactly.
+
+It is deliberately **not** byte-identical, and should not be. ObjEdit fills each 128-byte
+name slot with Delphi's `strcopy` into a reused local buffer, so real files carry stale
+bytes after the null terminator - an empty slot following `texture\desert1.tlb` literally
+contains `exture\desert1.tlb`. That is uninitialised memory, not data, and reproducing it
+would be wrong.
+
+### Where the file must live
+
+ObjEdit derives the path by replacing the `.RRF` name's **last character** with `I`
+(`convNameRRF_To_RRI`), so the sidecar must sit beside the model under the same stem.
+Without it ObjEdit warns *"No RRI file found, No auto load of textures!"* and loads the
+model with no textures at all.

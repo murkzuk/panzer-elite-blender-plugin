@@ -108,3 +108,22 @@ consistent with why `textureOfset`'s "implied slot" scheme exists in the first p
 
 To get a part's actual pixels: crop the atlas bitmap at
 `(posX × 16, posY × 16, sizeX, sizeY)`.
+
+## The palette block (confirmed 2026-08-12)
+
+The 2048-byte block at offset 8 is a **256-entry palette in the first 1024 bytes**, with
+the remaining 1024 bytes zero in every real library checked (20/20).
+
+Entries are `[R, G, B, 0]` - the **reverse** of a BMP palette's `[B, G, R, 0]`. Both
+facts come from the engine: `rrSendTexturePal()` (`rrobjpex.c`) copies `256*4` bytes and
+unpacks them as red = `(uint8)pal[i]`, green = `pal[i]>>8`, blue = `pal[i]>>16`. Verified
+entry by entry against a real `Normandy1.TLB`/`Normandy1_8.bmp` pair, e.g. BMP
+`B=89 G=84 R=93` appears in the TLB as `93 84 89`.
+
+Helpers: `read_tlb_palette()`, `tlb_palette_to_rgb()`, `rgb_to_tlb_palette()`, and
+`find_theatre_palette()` for borrowing a real one from the model's own texture folder.
+
+**A zero palette is not a neutral default.** The game reads paletted 8-bit bitmaps, so an
+all-zero palette renders every painted pixel black regardless of what was painted -
+`new_tlb_library()` previously wrote 2048 zero bytes, which meant every private-skin
+library shipped with a black palette that disagreed with its own `_8.BMP`.
