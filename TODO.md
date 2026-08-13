@@ -4,6 +4,31 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [x] **`.RRI` writer, palette sourcing, and the sortList question - all resolved
+  2026-08-12 by actually reading ObjEdit's and the engine's source rather than inferring
+  from file data.** Three things came out of it, two of them corrections to this repo's
+  own documentation:
+
+  1. **`.RRI` is six blocks, not one, and the library slot count varies by build.** Three
+     variants ship in real installs, identifiable by size alone: 214,144 (8 libs),
+     267,040 (16) and 668,448 (32). The old fixed 16-slot read could return group names
+     like "PantherGa" and "Name 16" as if they were library paths. `read_rri()` now
+     detects the variant; `write_rri()` produces the current 32-slot form with ObjEdit's
+     own defaults. Not byte-identical by design - real files carry stale `strcopy` buffer
+     content after each name terminator, which is uninitialised memory, not data.
+  2. **The `.TLB` palette is 256 entries of `[R,G,B,0]` in the first 1024 of its 2048-byte
+     block**, the reverse of BMP's `[B,G,R,0]`, confirmed against the engine's own
+     `rrSendTexturePal()`. This exposed a real bug: `new_tlb_library()` wrote 2048 zero
+     bytes, so **every private-skin `.TLB` shipped with an all-black palette** disagreeing
+     with its own `_8.BMP`. Now sourced from a real library in the model's texture folder.
+  3. **The sortList has no generator to reverse-engineer.** The proposed "fit against
+     7,418 files until byte-exact" programme was based on a false premise and has been
+     withdrawn. Nothing in the engine or ObjEdit generates one - `rrBspTreeEdit()` builds
+     no tree, it swaps a selected face one position up or down in the current view's
+     block. Real orderings are hand-authored per octant. New parts now get identity order
+     (`identity_sort_list()`), which 6.1% of real blocks and 5.1% of real parts already
+     use.
+
 - [ ] **Model AND paint a new vehicle entirely in Blender - scoped 2026-08-12, see
   [docs/AUTHORING_SCOPING.md](docs/AUTHORING_SCOPING.md).** User's stated direction: model
   in Blender, paint in Blender, get a working `.RRF` **and its `.TLB`** out, with ObjEdit

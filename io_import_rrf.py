@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 28, 0),
+    "version": (0, 29, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -1778,6 +1778,25 @@ def _face_centroid(face_verts, vertices):
     return (sum(xs) / n, sum(ys) / n, sum(zs) / n)
 
 
+def identity_sort_list(face_count):
+    """The 8 sortList blocks as plain 0..n-1 order.
+
+    The right default for a part with no authored ordering to carry forward. Established
+    2026-08-12 by reading the real source: NOTHING in the engine or in ObjEdit ever
+    generates a mesh sortList. The only writes are offset<->pointer conversion at load,
+    and rrBspTreeEdit() (Rrdwire.c) - which despite its name builds no tree, it swaps one
+    selected face one position earlier or later in the CURRENT view's block. The ordering
+    in a real file is therefore hand-authored by the artist, nudge by nudge, and no
+    algorithm can reproduce it. rrAddObject() imports a part from another file, carrying
+    that file's ordering with it.
+
+    Identity is not a guess: measured across 3,259 real parts (26,072 blocks), 6.1% of
+    blocks ship as exactly this, and 5.1% of parts use one identical ordering for all 8
+    octants. It is a shape real content genuinely takes, and draw order can then be tuned
+    in ObjEdit's own Sort tool exactly as it always has been."""
+    return [list(range(face_count)) for _ in range(8)]
+
+
 def compute_sort_list(vertices, faces):
     """Regenerates all 8 sortList blocks (RRF_FORMAT.md) for a mesh - Phase 2 of the
     geometry writer (docs/RRF_WRITER_SCOPING.md), needed the moment a part's face count
@@ -2108,6 +2127,10 @@ def rebuild_part_mesh_region(data, part_index, new_vertices, new_faces, new_text
     # remains a fallback for callers with no original to derive from - it does not
     # reproduce real orderings (see derive_sort_list), though it has not been shown to
     # cause a real failure either.
+    # No authored ordering to carry forward -> identity, which real content genuinely
+    # uses (see identity_sort_list). compute_sort_list() is kept for callers that
+    # explicitly want a depth-ordered guess, but it reproduces no real file and is not
+    # the default any more.
     if new_sort_blocks is not None:
         if len(new_sort_blocks) != 8:
             raise ValueError(f"new_sort_blocks must have 8 blocks, got {len(new_sort_blocks)}")
@@ -2116,7 +2139,7 @@ def rebuild_part_mesh_region(data, part_index, new_vertices, new_faces, new_text
                 raise ValueError(f"sort block {bi} has {len(blk)} entries, expected {new_faceCount}")
         sort_blocks = new_sort_blocks
     else:
-        sort_blocks = compute_sort_list(new_vertices, new_faces)
+        sort_blocks = identity_sort_list(new_faceCount)
 
     face_bytes = bytearray()
     mat_infos = list(new_material_info) if new_material_info is not None else [None] * len(new_faces)

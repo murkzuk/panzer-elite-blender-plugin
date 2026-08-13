@@ -79,20 +79,36 @@ every save; a Blender-authored model should too, or it will not round-trip into 
 cleanly. Format is already documented in [RRI_FORMAT.md](RRI_FORMAT.md) (16 slots of
 128-byte null-padded paths) - this is the smallest item on the list.
 
-### 4. `sortList` for a model with no original to derive from
+### 4. `sortList` for a model with no original to derive from - RESOLVED 2026-08-12
 
-This is the one genuine risk. `derive_sort_list()` works by carrying the part's own
-authored ordering forward - a brand-new part has none, leaving only
-`compute_sort_list()`, which reproduces a real ordering in **7-11 of 328 positions per
-block**. It has never been shown to cause a real failure, but it has also never been
-shown to be correct.
+**The measurement programme this section originally proposed was based on a false
+premise and should not be run.** It assumed a generating algorithm existed that could be
+fitted against the 7,418-file corpus. Reading the real source shows there is none.
 
-**This is solvable by measurement rather than guesswork, and should be, before relying
-on it**: there are 7,418 real `.RRF` files on disk, each containing 8 known-good blocks.
-That is a large labelled dataset. The task is to find the rule that reproduces them
-byte-exactly - iterate on the candidate depth metric, axis/sign mapping and tie-breaking
-until exact-match rate approaches 100%, rather than settling for a correlation. Until
-that is done, treat any from-scratch model as needing a real in-tool check.
+Nothing in the engine or in ObjEdit ever generates a mesh sortList. The only writes
+anywhere are offset<->pointer conversion at load (`object.c`) and `rrBspTreeEdit()`
+(`Rrdwire.c`) - which, despite the name, builds no tree: it swaps one selected face one
+position earlier (`sortFlag==1`) or later (`sortFlag==2`) in the block for the *current
+view direction*. That is ObjEdit's manual "move this face forward/back in the draw order"
+tool, driven by `rrSetSortInfo`. `rrAddObject()` imports a part from another file and
+carries that file's ordering along with it.
+
+So a real file's ordering is **hand-authored by the artist, one nudge at a time**, per
+octant. No algorithm reproduces it, which is exactly why `compute_sort_list()`'s
+closed-form recipe matched only 7-11 of 328 positions per block - it was never modelling
+a real process.
+
+**What a new part should get instead: plain identity order (0..n-1) in all 8 blocks.**
+That is not a guess either. Measured across 3,259 real parts (26,072 blocks): 6.1% of
+blocks ship as exactly identity, and 5.1% of parts use one identical ordering across all
+8 octants. It is a shape real content genuinely takes, the engine accepts it, and the
+artist can then tune draw order in ObjEdit's own Sort tool - the same way every real
+model got its ordering in the first place.
+
+Implemented as `identity_sort_list()`, now the fallback in `rebuild_part_mesh_region()`
+whenever there is no authored ordering to derive from. `derive_sort_list()` remains
+correct and preferred wherever an original exists; `compute_sort_list()` is kept only for
+callers who explicitly want a depth-ordered guess.
 
 ## Open questions to settle before building
 
