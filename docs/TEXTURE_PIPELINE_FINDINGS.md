@@ -224,3 +224,25 @@ The texture id decode was re-tested against the same ground truth. A 24-bit
 bits 0-11 + slot bits 12-15 decode resolves 52.0%. **The existing decode stays.** Note
 that its earlier "verified by round-tripping 115,613 faces with zero mismatches" evidence
 showed only that decode/encode are inverses - reversibility, not correctness.
+
+### Visually confirmed on the Italy Tiger
+
+Rendered `Italy_Obj/Tiger1.RRF` from the same camera under both readings. **8.56% of
+pixels differ, max channel delta 159** - and the difference is the whole point: the old
+reading produced the smeared, vertically-streaked hull this project has been chasing,
+while the new one resolves hatches, vision ports, weld seams, road-wheel detail and
+proper camouflage mottling.
+
+The mechanism is visible in the numbers. On this model the old reading invented a
+non-zero origin on 1,263 of 4,785 faces (26%), with Y values of 32/64/160px. The
+importer then clamps `start_y` to `sizeY - 1` and takes `crop_y = min(crop_h, sizeY -
+start_y)`, so an origin past the entry's height collapses the crop to a **1-pixel-tall
+strip** stretched over the whole face - exactly the streaking.
+
+### Testing trap that produced a false negative first
+
+Blender caches an addon as `scripts/addons/__pycache__/io_import_rrf.cpython-*.pyc`.
+A/B-ing two variants by overwriting the `.py` between runs silently ran the **same stale
+bytecode twice** and reported a perfect 0-pixel difference. Delete the `.pyc` between
+runs, and treat "the change had literally zero effect" as a signal to check the cache
+before believing it.
