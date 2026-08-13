@@ -484,3 +484,30 @@ Verified: the closest grey sits 0.743 from white in linear space, far outside th
 threshold.
 
 Builder script: `tools/uvtest/make_uvtest.py`.
+
+### FIXED v0.51.0: the UV rect was one pixel short
+
+Chasing the cell-scale mismatch by elimination rather than theory:
+
+- **crop size formula** - identical to the engine's
+  (`(((materialInfo & 0x0F00) >> 8) + 1) * 16` vs `FSizeX` in `rrUsedSelection`);
+- **clamping to the entry** - the importer clamps and the engine does not, but on Psw222
+  **0 of 137 faces** actually exceed their entry, so it never fires.
+
+That left how the rect becomes UVs:
+
+```
+engine:    FStartX .. FStartX + FSizeX          spans FSizeX pixels
+importer:  x0 = start_x, x1 = start_x + crop_x - 1   spans crop_x - 1
+```
+
+**One pixel short on every face.** The resulting scale error is `(crop-1)/crop` - 3% on a
+32px crop but **6.25% on a 16px one**, and 66 of Psw222's 137 faces use 16x16. An error
+that varies with crop size is exactly what "the cells are not the same scale" looks like
+against a fixed 32px test grid.
+
+Fixed by spanning the full crop (`x1 = start_x + crop_x`). Changed 2.90% of pixels on the
+test render; 137 faces, 0 unresolved, no regression.
+
+Found only because the labelled UV pattern made the discrepancy visible - eyeballing
+camouflage would never have surfaced a 6% scale error.

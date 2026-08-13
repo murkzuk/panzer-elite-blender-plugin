@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 50, 0),
+    "version": (0, 51, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -3085,8 +3085,18 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_f
                             start_y = min(start_y, max(sizeY - 1, 0))
                             crop_x = min(crop_w, sizeX - start_x)
                             crop_y = min(crop_h, sizeY - start_y)
+                            # Span the FULL crop, edge to edge - not crop-1.
+                            #
+                            # rrUsedSelection() treats a face's rect as FStartX ..
+                            # FStartX+FSizeX, i.e. covering FSizeX pixels. Subtracting 1
+                            # here made the UV rect one pixel short, so every face sampled
+                            # a slightly shrunken region: (crop-1)/crop, which is 3% on a
+                            # 32px crop but 6.25% on a 16px one. Because the error scales
+                            # with crop size it showed up as "the cells are not the same
+                            # scale" when a labelled test grid was compared against
+                            # ObjEdit's own render of the same model.
                             x0, y0 = start_x, start_y
-                            x1, y1 = start_x + crop_x - 1, start_y + crop_y - 1
+                            x1, y1 = start_x + crop_x, start_y + crop_y
                             # Corner order for a face with NO stored corner data.
                             #
                             # v1 = top-LEFT, v2 = top-right, v3 = bottom-right,
