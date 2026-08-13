@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 51, 0),
+    "version": (0, 52, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -3040,14 +3040,45 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_f
                 unresolved_attr = mesh.attributes.new(
                     name="pe_texture_unresolved", type="BOOLEAN", domain="FACE"
                 )
-                for mat in mesh_materials:
+                # Own material for flat-colour faces, so they are visibly distinct from
+                # both textured and unresolved geometry rather than silently riding on the
+                # atlas material.
+                flat_mat = bpy.data.materials.get("PE_FLAT_COLOR")
+                if flat_mat is None:
+                    flat_mat = bpy.data.materials.new("PE_FLAT_COLOR")
+                    flat_mat.use_nodes = True
+                    _b = flat_mat.node_tree.nodes.get("Principled BSDF")
+                    if _b is not None:
+                        _b.inputs["Base Color"].default_value = (0.34, 0.34, 0.34, 1.0)
+                # Build this mesh's slot list WITHOUT mutating the shared mesh_materials
+                # list - doing so accumulated a duplicate PE_FLAT_COLOR per part.
+                _mats = list(mesh_materials) + [flat_mat]
+                for mat in _mats:
                     mesh.materials.append(mat)
+                flat_index = len(_mats) - 1
 
                 for poly in mesh.polygons:
                     corners = part.face_uv_corners[poly.index]
                     tex_id = part.face_texture_id[poly.index]
                     if tex_id is None:
-                        continue  # not meant to reference the shared TLB at all (solid-shaded, etc.)
+                        # A FLAT-COLOUR face: textureOfset bit 31 is clear, so the field
+                        # holds a colour rather than a texture id. 1,158 faces across a
+                        # real install (1.38%) are like this.
+                        #
+                        # Skipping used to leave them on the shared atlas material with
+                        # Blender's default 0-1 UVs, which samples the ENTIRE 256x4096
+                        # atlas across one polygon - the whole texture appearing on a
+                        # single gun-barrel face. They were not counted as unresolved
+                        # either, so nothing flagged it: convincingly wrong rather than
+                        # visibly unresolved, the recurring failure mode in this importer.
+                        #
+                        # Give them their own material and collapse their UVs so they can
+                        # never sample the atlas. Decoding the actual PE colour out of the
+                        # low bits is a separate job - see KNOWN_LIMITATIONS.md.
+                        poly.material_index = flat_index
+                        for loop_index in poly.loop_indices:
+                            uv_layer.data[loop_index].uv = (0.0, 0.0)
+                        continue
                     entry, slot = resolve_texture_id(tex_id, slot_to_parts) if corners is not None else (None, None)
                     material = slot_to_material.get(slot) if entry is not None else None
                     if entry is not None and material is not None:

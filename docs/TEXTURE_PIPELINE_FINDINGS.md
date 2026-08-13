@@ -542,7 +542,7 @@ importer; not the residual error.
 That leaves the **half-texel convention** as the leading candidate, and ObjEdit's own
 viewport scaling as the thing to rule out before trusting the comparison at all.
 
-### NEXT BUG, precisely located: the id-fallback path emits a WHOLE-ATLAS UV rect
+### SOLVED v0.52.0: flat-colour faces were riding on the atlas material
 
 User spotted the whole texture appearing on a single gun-barrel face. Dumping the actual
 UVs for `Psw222` / `Main_Gun` in atlas pixels:
@@ -604,3 +604,31 @@ in one run. Do not fix by inference - v0.51.0 currently produces pixel-perfect U
 faces 0-6 and is worth not breaking.
 
 Also worth auditing afterwards: how many faces install-wide currently take that path.
+
+#### Resolution of the whole-atlas-UV bug (v0.52.0)
+
+Neither candidate was right. The instrumented run settled it in one go:
+
+```
+face 7   mat=Psw222_UvTest_8_mat   unresolved=False   u 0.0000..1.0000  v 0.0000..1.0000
+```
+
+Not unresolved, not a fallback - **a FLAT-COLOUR face**. `textureOfset` bit 31 is clear
+(`0x00005478` against face 6's `0x800000CA`), so the field holds a colour, not a texture
+id. `build_blender_objects` skipped it with `continue`, which left it carrying material
+slot 0 - the shared atlas - and Blender's default 0-1 UVs, sampling the ENTIRE 256x4096
+atlas across one polygon.
+
+**1,158 faces across the install (1.38%) were doing this**, none of them flagged: they were
+not counted as unresolved, so every "0 unresolved" report was quietly optimistic.
+
+Fixed by giving flat-colour faces their own `PE_FLAT_COLOR` material and collapsing their
+UVs to (0,0), so they cannot sample the atlas at all. Decoding the actual PE colour out of
+the low bits remains a separate job.
+
+**Self-inflicted bug caught in the same run:** the first version appended the flat material
+to the shared `mesh_materials` list inside the per-part loop, so a 5-part model accumulated
+four duplicate `PE_FLAT_COLOR` slots. Building a per-mesh copy fixes it. Verified: the
+material list is now `['<atlas>', 'PE_UNRESOLVED_TEXTURE', 'PE_FLAT_COLOR']` exactly.
+
+Regression: M4a3 and PantherG both still 321 faces / 0 unresolved.
