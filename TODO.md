@@ -4,6 +4,25 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [x] **Face draw-order nudge - built 2026-08-12.** `MESH_OT_pe_move_face_draw_order`
+  ("PE: Move Face(s) in Draw Order"). Worth building precisely because the ordering is
+  hand-authored: there is no algorithm to recalculate it with, so the one-step nudge is
+  the only operation that exists on it, in the original tool or here.
+
+  Reproduces `rrBspTreeEdit` (Rrdwire.c) step for step, including its group behaviour - a
+  run of selected faces shifts together without overtaking each other (verified:
+  `[0,1,2,3,4,5]` moving `{2,3}` later gives `[0,1,4,2,3,5]`). Writes straight to the
+  `.RRF`; the sortList is fixed-size so nothing is rebuilt.
+
+  Defaults to nudging all 8 octants together, which is predictable and almost always
+  wanted. A single octant can be chosen (bit0 = X>=0, bit1 = Y>=0, bit2 = Z>=0 per
+  `rrDirectionToSortListNo`) for ObjEdit's per-view behaviour. Blender's viewport is
+  deliberately NOT auto-mapped onto that - PE's matrix convention has not been verified,
+  and guessing would silently edit the wrong octant.
+
+  Verified on a real model: the selected face moved position 3 -> 4, all 8 blocks stayed
+  valid permutations, `.bak` written, and the validator reports no errors afterwards.
+
 - [x] **Gameplay attributes are now writable, and there is a model validator - 2026-08-12.**
   The two items the gap analysis ranked highest, both built and verified.
 

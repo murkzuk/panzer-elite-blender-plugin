@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 33, 0),
+    "version": (0, 34, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -15,7 +15,7 @@ import math
 import bpy
 import bmesh
 from bpy_extras.io_utils import ImportHelper, ExportHelper
-from bpy.props import StringProperty, BoolProperty, EnumProperty, FloatVectorProperty
+from bpy.props import StringProperty, BoolProperty, EnumProperty, FloatVectorProperty, IntProperty
 from mathutils import Matrix, Vector
 
 ATLAS_EXPECTED_SIZE = (256, 4096)
@@ -4032,6 +4032,48 @@ def write_object_mesh_into_rrf(rrf_data, obj, bm, part_index):
     return new_data, stats
 
 
+def patch_sort_list(data, part_index, lod, blocks):
+    """Overwrites a part's 8 sortList blocks in place. Fixed-size region, so no rebuild
+    is needed - the bytes are simply replaced.
+
+    `blocks` must be 8 lists of exactly faceCount uint16 entries; the 0x8000 skip flag
+    in an entry is written through untouched."""
+    mesh_off = _mesh_record_offset(part_index, lod)
+    faceCount, = struct.unpack_from("<I", data, mesh_off + 4)
+    sortList_off, = struct.unpack_from("<I", data, mesh_off + 28)
+    if len(blocks) != 8:
+        raise ValueError("expected 8 sortList blocks, got %d" % len(blocks))
+    for b, blk in enumerate(blocks):
+        if len(blk) != faceCount:
+            raise ValueError("sort block %d has %d entries, expected %d" % (b, len(blk), faceCount))
+        struct.pack_into("<%dH" % faceCount, data, sortList_off + b * faceCount * 2,
+                         *[v & 0xFFFF for v in blk])
+
+
+def move_faces_in_sort_block(block, face_indices, later):
+    """Moves the given faces one position through a single sortList block, mirroring the
+    real tool exactly (rrBspTreeEdit in Rrdwire.c).
+
+    ObjEdit walks the block and swaps each selected entry with its neighbour - forwards
+    from index 1 when moving earlier, backwards from the end when moving later - so a run
+    of selected faces shifts as a group without overtaking each other. Reproduced here
+    step for step rather than reimplemented, since draw order is hand-authored and this
+    is the only operation the original tool offers on it.
+
+    Returns a new list; `block` is not modified."""
+    out = list(block)
+    targets = set(face_indices)
+    if later:
+        for i in range(len(out) - 2, -1, -1):
+            if (out[i] & 0x7FFF) in targets:
+                out[i + 1], out[i] = out[i], out[i + 1]
+    else:
+        for i in range(1, len(out)):
+            if (out[i] & 0x7FFF) in targets:
+                out[i - 1], out[i] = out[i], out[i - 1]
+    return out
+
+
 def validate_rrf(filepath):
     """Checks a .RRF for the problems that have actually bitten this project, and returns
     a list of (severity, part_index_or_None, message) - severity "ERROR" for something the
@@ -4152,6 +4194,130 @@ def validate_rrf(filepath):
     if textureStart + textureLen > len(data):
         findings.insert(0, ("ERROR", None, "textureStart+textureLen runs past the end of the file"))
     return findings
+
+
+class MESH_OT_pe_move_face_draw_order(bpy.types.Operator):
+    """Moves the selected face(s) one step earlier or later in this part's draw order.
+
+    A part stores 8 draw orders - one per viewing octant - and the engine picks whichever
+    matches the current view direction. Nothing generates them: the only tool the original
+    ObjEdit offers is exactly this one-step nudge (rrSetSortInfo -> rrBspTreeEdit), so a
+    real model's ordering is hand-authored face by face. That is why this operator exists
+    rather than a "recalculate draw order" button - there is no algorithm to recalculate
+    it with.
+
+    Use it when a face draws through something it should be behind. Later = drawn nearer
+    the end = on top.
+
+    By default all 8 octants are nudged together, which is predictable and is almost
+    always what is wanted. ObjEdit instead edits only the octant matching its current
+    view; a specific octant can be chosen here for that, indexed as
+    bit0 = X>=0, bit1 = Y>=0, bit2 = Z>=0 in the part's own space (rrDirectionToSortListNo).
+    Blender's viewport is deliberately NOT mapped onto that automatically - matching PE's
+    matrix convention has not been verified, and guessing it would silently edit the wrong
+    octant.
+
+    Writes straight to the .RRF (with the usual one-time .bak); the sortList is a
+    fixed-size region, so nothing is rebuilt."""
+
+    bl_idname = "mesh.pe_move_face_draw_order"
+    bl_label = "PE: Move Face(s) in Draw Order"
+    bl_options = {"REGISTER", "UNDO"}
+
+    later: BoolProperty(
+        name="Draw Later (on top)",
+        description="Move the selection towards the end of the draw order, so it draws "
+                    "over things instead of under them",
+        default=True,
+    )
+    all_octants: BoolProperty(
+        name="All View Directions",
+        description="Nudge the face in all 8 stored draw orders. Turn off to edit a "
+                    "single octant, as ObjEdit does for its current view",
+        default=True,
+    )
+    octant: IntProperty(
+        name="Octant",
+        description="Which of the 8 stored draw orders to edit "
+                    "(bit0 = X>=0, bit1 = Y>=0, bit2 = Z>=0 in the part's own space)",
+        default=0, min=0, max=7,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (
+            obj is not None
+            and obj.type == "MESH"
+            and obj.mode == "EDIT"
+            and "pe_rrf_filepath" in obj
+            and "pe_part_index" in obj
+        )
+
+    def execute(self, context):
+        obj = context.active_object
+        mesh = obj.data
+        rrf_filepath = obj["pe_rrf_filepath"]
+        part_index = obj["pe_part_index"]
+
+        bm = bmesh.from_edit_mesh(mesh)
+        bm.faces.ensure_lookup_table()
+        f_idx = bm.faces.layers.int.get("pe_face_index")
+        f_orig = bm.faces.layers.int.get("pe_face_orig")
+        if f_idx is None:
+            self.report({"ERROR"}, "This mesh has no pe_face_index data - re-import it")
+            return {"CANCELLED"}
+
+        selected = [f for f in bm.faces if f.select]
+        if not selected:
+            self.report({"WARNING"}, "No faces selected")
+            return {"CANCELLED"}
+
+        try:
+            rrf_data = bytearray(read_rrf_raw(rrf_filepath))
+        except OSError as e:
+            self.report({"ERROR"}, "Could not read %s: %s" % (rrf_filepath, e))
+            return {"CANCELLED"}
+
+        mesh_off = _mesh_record_offset(part_index, 0)
+        faceCount, = struct.unpack_from("<I", rrf_data, mesh_off + 4)
+
+        targets, unwritten = [], 0
+        for f in selected:
+            if f_orig is not None and not f[f_orig]:
+                unwritten += 1
+                continue
+            fi = f[f_idx]
+            if 0 <= fi < faceCount:
+                targets.append(fi)
+            else:
+                unwritten += 1
+        if not targets:
+            self.report({"ERROR"}, "None of the selected faces exist in the file yet - write "
+                                   "the mesh first, then reorder")
+            return {"CANCELLED"}
+
+        blocks = read_sort_list(rrf_data, part_index, 0)
+        which = range(8) if self.all_octants else [self.octant]
+        for b in which:
+            blocks[b] = move_faces_in_sort_block(blocks[b], targets, self.later)
+
+        try:
+            patch_sort_list(rrf_data, part_index, 0, blocks)
+        except ValueError as e:
+            self.report({"ERROR"}, "Could not write the draw order: %s" % e)
+            return {"CANCELLED"}
+
+        _backup_once(rrf_filepath)
+        write_rrf_raw(rrf_filepath, bytes(rrf_data))
+
+        msg = "Moved %d face(s) %s in %s" % (
+            len(targets), "later" if self.later else "earlier",
+            "all 8 view directions" if self.all_octants else "octant %d" % self.octant)
+        if unwritten:
+            msg += " (%d selected face(s) skipped - not in the file yet)" % unwritten
+        self.report({"INFO"}, msg)
+        return {"FINISHED"}
 
 
 class MESH_OT_pe_validate_model(bpy.types.Operator):
@@ -4643,6 +4809,7 @@ def menu_func_detach_face(self, context):
     self.layout.operator(MESH_OT_pe_write_vertex_positions.bl_idname, icon="VERTEXSEL")
     self.layout.operator(MESH_OT_pe_delete_faces.bl_idname, icon="TRASH")
     self.layout.operator(MESH_OT_pe_set_part_attribute.bl_idname, icon="MODIFIER")
+    self.layout.operator(MESH_OT_pe_move_face_draw_order.bl_idname, icon="SORTSIZE")
     self.layout.operator(MESH_OT_pe_validate_model.bl_idname, icon="CHECKMARK")
     self.layout.operator(MESH_OT_pe_write_mesh.bl_idname, icon="EXPORT")
 
@@ -4655,6 +4822,7 @@ def register():
     bpy.utils.register_class(MESH_OT_pe_set_face_crop)
     bpy.utils.register_class(MESH_OT_pe_flip_face_texture)
     bpy.utils.register_class(MESH_OT_pe_give_private_skin)
+    bpy.utils.register_class(MESH_OT_pe_move_face_draw_order)
     bpy.utils.register_class(MESH_OT_pe_validate_model)
     bpy.utils.register_class(MESH_OT_pe_set_part_attribute)
     bpy.utils.register_class(MESH_OT_pe_write_mesh)
@@ -4670,6 +4838,7 @@ def unregister():
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     bpy.utils.unregister_class(MESH_OT_pe_delete_faces)
+    bpy.utils.unregister_class(MESH_OT_pe_move_face_draw_order)
     bpy.utils.unregister_class(MESH_OT_pe_validate_model)
     bpy.utils.unregister_class(MESH_OT_pe_set_part_attribute)
     bpy.utils.unregister_class(MESH_OT_pe_write_mesh)
