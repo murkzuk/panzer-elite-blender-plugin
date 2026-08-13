@@ -4,6 +4,30 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [ ] **UNSOLVED: how face texture coordinates are actually derived.** The "jumbled
+  textures" symptom is NOT fixed, and the crop-rectangle model previously recorded in
+  RRF_FORMAT.md is now known to be wrong. Written up in full there; the short version:
+
+  On a real Italy Tiger every one of 4,785 faces has all-zero corner bytes, `attribVList`
+  is 96.6% zero, and 4,256 faces share just two entries with identical size and origin -
+  so the file does not appear to contain per-face UVs at all. The decisive contradiction:
+  `materialInfo` gives a 64x48 crop against a 32x128 entry, i.e. wider than the entry that
+  should contain it, on 4,737 of 4,772 faces. All four nibble-order combinations fit
+  inside their entry only 13-22% of the time.
+
+  The renderer takes per-vertex float `tu/tv` (`WVERTEX` in WingsHAL.h) and
+  `halRenderFaces()` receives only the sort list, so the HAL computes them itself.
+  **OBJHALX5.dll has no source in any available archive** - rrobjpex, ObjEdit, Select,
+  VisualAI, mod_enabler2 and Particle_Editor were all checked.
+
+  **Next step that needs no further source**: paint the labelled checkerboard into a
+  library atlas, load an affected model in the real ObjEdit, and read the mapping off the
+  result directly. That technique is already proven in this project.
+
+  What IS solid and stays: the 32-library texture-id decode (Tigers 35%->100% resolved),
+  slot-correct library selection, and per-slot library assignment. Those are separate
+  wins and are verified.
+
 - [x] **"Jumbled textures" finally solved - the per-face crop ORIGIN was never read.
   2026-08-12.** The user's standing complaint ("this is our Achilles heel") turned out to
   be one missing field.

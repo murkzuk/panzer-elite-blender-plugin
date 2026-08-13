@@ -283,3 +283,40 @@ appearance users reported as "jumbled textures".
 Faces that *do* carry explicit corners use the other branch, where each stored value is
 one less than the real one (`if(SizeX != 0) SizeX++`), matching how `rrSetTexture()`
 writes them (`xSize = sx - 1`).
+
+
+## UNRESOLVED: how a face's texture coordinates are actually derived
+
+**Status 2026-08-12: not solved.** The section above describes the crop rectangle as
+"origin from textureOfset bits 16-23, size from materialInfo bits 8-15". That reading is
+now known to be **wrong**, and it is recorded here so nobody rebuilds it from the same
+evidence.
+
+What was measured on a real Italy Tiger (`Italy_Obj/Tiger1.RRF`, 4,785 textured faces):
+
+- **Every face has all-zero corner bytes.** There is no explicit per-face UV data.
+- **`attribVList` is 96.6% zero**, so it is not carrying UVs either.
+- Nearly all faces share **one entry, one materialInfo size, one origin** - 4,256 of them
+  reference just two entries. There is not enough varying data in these fields to texture
+  a vehicle face-by-face.
+- **The decisive contradiction**: `materialInfo` yields a 64x48 "crop" against an entry
+  that is 32x128. The crop is wider than the entry that should contain it, on 4,737 of
+  4,772 faces. Swapping the nibbles does not help (48x64 still exceeds 32).
+- Scoring all four combinations of (size nibbles swapped) x (origin nibbles swapped) by
+  whether `origin + size <= entry size` gives fit rates of only 13-22%. A correct reading
+  would fit essentially always.
+
+So the mapping is not read from the file in any form found so far; the engine must derive
+it. `WingsHAL.h` shows the renderer consumes per-vertex float `tu, tv` (`WVERTEX`), and
+`halRenderFaces()` receives only the sort list - so the HAL walks the part and computes
+those coordinates itself. **`OBJHALX5.dll`'s source is not present in any available
+archive** (`rrobjpex`, `ObjEdit`, `Select`, `VisualAI`, `mod_enabler2`, `Particle_Editor`
+were all checked), so this cannot be settled from source alone.
+
+### The way to settle it without more source
+
+Paint a known pattern (the labelled checkerboard used elsewhere in this project) into a
+library's atlas, load an affected model in the real ObjEdit, and observe which part of the
+pattern lands on which face. That technique already worked here for validating UV work and
+needs neither the HAL source nor anyone else's help. It is slow but self-sufficient and
+gives ground truth directly.
