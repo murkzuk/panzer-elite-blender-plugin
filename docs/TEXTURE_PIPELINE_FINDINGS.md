@@ -363,3 +363,27 @@ had to be measured.
 **Not yet verified for the explicit-corner path.** Both models used here are 100%
 all-zero faces, so neither exercises it. The Sherman (`M4a376HV.RRF`, 94% explicit) is
 the model to check next.
+
+### Still open: the EXPLICIT-corner path, and a warning about the test corpus
+
+`Normandy_Obj/M4a376HV_working.RRF` (8,602 faces, 100% explicit) renders with large
+magenta areas - magenta being the atlas's own filler between packed entries, so those
+faces sample outside their intended rectangle. Measured: **68.4% of explicit crops
+overflow their entry** (TigerE_1: 79%).
+
+Tried and rejected: reading the explicit X as an **atlas-absolute** coordinate instead of
+an offset within the entry. The numbers looked compelling - 100.0% of explicit rects fit
+a 256-wide atlas on both models, against only 21-32% fitting entry-relative, and the field
+is a byte so it cannot be absolute in Y (the atlas is 4096 tall). Rendering it improved
+the turret slightly and left the hull just as magenta. Reverted; verified 0 pixels differ
+from the v0.46.0 baseline.
+
+**Caveat on the corpus, from the user (2026-08-13): many `Panzer Elite Ostpak3` models are
+broken in ObjEdit itself.** `CustomA/M4a376HV.RRF` loads there as flat untextured olive
+drab - its library genuinely is not resolvable, which matches this project's own finding
+that no library covers its slot 19 above 74%. So a bad render from that tree is NOT
+evidence of an importer bug. Before chasing any future texture defect, confirm the model
+actually renders correctly in ObjEdit first. Models sitting in the working ObjEdit folder
+(`OE_2`: ShermanIII, Firefly, M4A2L, the `Tiger1 PE` folder) are the trustworthy corpus;
+`CustomA/Sdkfz184.RRF` is confirmed-good in ObjEdit and is the reference model for the
+all-zero path.
