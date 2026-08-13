@@ -114,3 +114,48 @@ files contain both styles (`texture\customa1.tlb` and
   found, No auto load of textures!"), and the renderer then dereferences texture pointers
   that were never populated.
 - Test artifacts written into `Texture/` pollute auto-detect for **every** model. Clean up.
+
+
+---
+
+## UPDATE 2026-08-13: explicit corners are origin+size, not four positions
+
+Two corrections to what is written above.
+
+### 1. Explicit corners are the MAJORITY case, not a rarity
+
+An earlier note in this project claimed "0/1490 faces have non-zero corners" from a
+five-vehicle sample. Scanning the whole install instead: **5,198,380 of 7,437,702
+textured faces (69.9%) carry explicit corners, across 928 models.** The all-zero fallback
+is the minority path. The Italy Tiger, which drove the earlier investigation, happens to
+be one of the all-zero models - which is why it looked like the normal case.
+
+### 2. The four corner fields are a mix of ORIGIN and SIZE
+
+`rrUsedSelection()` reads them as:
+
+```c
+StartX = uvFace->v3 & 0xFF;            SizeX = uvFace->v1 & 0xFF;
+StartY = (uvFace->v1 & 0xFF00) >> 8;   SizeY = (uvFace->v3 & 0xFF00) >> 8;
+// each incremented when non-zero
+```
+
+matching how `rrSetTexture()` writes them (`xStart = X-1`, `xSize = sx-1`). So `v1.x` is a
+**size**, not a right-edge coordinate. This importer treated all four fields as literal
+corner positions, which puts the crop in the wrong place on every face carrying real
+corner data - i.e. on the 69.9% majority.
+
+Fixed in v0.42.0. On a real Sherman (`M4a376HV.RRF`, 94% explicit-corner faces) the
+turret went from largely magenta to properly camouflaged and the running gear gained real
+detail.
+
+### Still imperfect
+
+Some hull faces on that Sherman still land on magenta. Magenta is the atlas's own filler
+between packed entries (20.9% of `CustomA13`'s atlas), so those faces are still being
+mapped outside their intended rectangle. The `+1`-when-non-zero convention is implemented;
+what remains is likely a further detail of the same rect maths, or the interaction with
+entries whose `posX/posY` place them elsewhere in the atlas.
+
+The all-zero fallback (the Italy Tiger) is unchanged and still unexplained - see the
+open section above.

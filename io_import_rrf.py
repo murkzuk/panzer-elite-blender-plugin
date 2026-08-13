@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 41, 0),
+    "version": (0, 42, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -2933,6 +2933,30 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_f
                             x1, y1 = start_x + crop_x - 1, start_y + crop_y - 1
                             full_rect = [(x1, y0), (x0, y0), (x0, y1), (x1, y1)]
                             corners = full_rect[:len(corners)]
+                        else:
+                            # Explicit corners are NOT four literal positions - they are a
+                            # mix of origin and SIZE. rrUsedSelection() (Rrdwire.c) reads:
+                            #   StartX = v3 & 0xFF          SizeX = v1 & 0xFF
+                            #   StartY = (v1 & 0xFF00) >> 8 SizeY = (v3 & 0xFF00) >> 8
+                            # each incremented when non-zero, matching how rrSetTexture()
+                            # writes them (xStart = X-1, xSize = sx-1). Treating v1.x as a
+                            # right-edge coordinate - which this importer did - puts the
+                            # crop in the wrong place for every face that carries real
+                            # corner data, and 69.9% of all textured faces on a real
+                            # install do (5,198,380 of 7,437,702 across 928 models).
+                            e_sx = corners[0][0]
+                            e_sy = corners[2][1]
+                            e_ox = corners[2][0]
+                            e_oy = corners[0][1]
+                            if e_sx: e_sx += 1
+                            if e_sy: e_sy += 1
+                            if e_ox: e_ox += 1
+                            if e_oy: e_oy += 1
+                            if e_sx and e_sy:
+                                x0, y0 = e_ox, e_oy
+                                x1, y1 = e_ox + e_sx - 1, e_oy + e_sy - 1
+                                rect = [(x1, y0), (x0, y0), (x0, y1), (x1, y1)]
+                                corners = rect[:len(corners)]
                         for loop_index, (lx, ly) in zip(poly.loop_indices, corners):
                             atlas_x = posX * 16 + lx
                             atlas_y = posY * 16 + ly
