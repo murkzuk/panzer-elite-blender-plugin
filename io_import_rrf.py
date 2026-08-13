@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 35, 0),
+    "version": (0, 36, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -759,6 +759,61 @@ def apply_private_skin(rrf_data, part_index, bm, uv_layer, plans, library, margi
             )
             updated += 1
     return updated
+
+
+def decode_texture_offset(value):
+    """Splits a face's textureOfset into (upper16, library_slot, part_id).
+
+    Layout confirmed from rrReNumTLB() (rrobjpex.c): the low 16 bits hold the library
+    slot in bits 12-15 and the part id in bits 0-11, with a 32-library extension - a part
+    id above 2047 means the real slot is slot+16 and the real id is id-2048. The upper 16
+    bits (which include bit 31, the "is textured" flag) are carried around untouched by
+    the real code and are returned here so they can be put back verbatim."""
+    upper = (value >> 16) & 0xFFFF
+    slot = (value >> 12) & 0xF
+    part_id = value & 0xFFF
+    if part_id > 2047:
+        slot += 16
+        part_id -= 2048
+    return upper, slot, part_id
+
+
+def encode_texture_offset(upper, slot, part_id):
+    """Inverse of decode_texture_offset(), including the 32-library extension: slots 16
+    and above are stored as slot-16 with 2048 added to the part id."""
+    if slot > 15:
+        slot -= 16
+        part_id += 2048
+    return ((upper & 0xFFFF) << 16) | ((slot & 0xF) << 12) | (part_id & 0xFFF)
+
+
+def remap_part_library(data, part_index, old_slot, new_slot, max_id=4095, lod=0):
+    """Repoints every face of a part that uses `old_slot` at `new_slot`, exactly as
+    ObjEdit's ReNumTLB does. Mutates `data` in place.
+
+    Faces whose part id is greater than `max_id` are left alone and counted rather than
+    remapped - the real code does the same, because the target library may simply not
+    have an entry that high, and silently pointing a face at a non-existent rectangle
+    would be worse than leaving it where it is.
+
+    Returns (remapped, skipped)."""
+    mesh_off = _mesh_record_offset(part_index, lod)
+    faceCount, faceList_off = struct.unpack_from("<II", data, mesh_off + 4)
+    remapped = skipped = 0
+    for f in range(faceCount):
+        off = faceList_off + f * FACE_SIZE + 12
+        value, = struct.unpack_from("<I", data, off)
+        if not (value & 0x80000000):
+            continue
+        upper, slot, part_id = decode_texture_offset(value)
+        if slot != old_slot:
+            continue
+        if part_id > max_id:
+            skipped += 1
+            continue
+        struct.pack_into("<I", data, off, encode_texture_offset(upper, new_slot, part_id))
+        remapped += 1
+    return remapped, skipped
 
 
 def resolve_texture_id(texture_id, slot_to_parts):
@@ -4212,6 +4267,93 @@ def validate_rrf(filepath):
     return findings
 
 
+class MESH_OT_pe_remap_texture_library(bpy.types.Operator):
+    """Repoints this model's faces from one texture-library slot to another - ObjEdit's
+    ReNumTLB. Useful for moving a vehicle onto a different theatre's libraries without
+    re-texturing it face by face.
+
+    A face's textureOfset holds the library slot in bits 12-15 and the part id in bits
+    0-11, with a 32-library extension where a part id above 2047 means slot+16 and
+    id-2048. This changes only the slot; the part id and everything in the upper 16 bits
+    are preserved, so each face keeps pointing at the same rectangle number in whichever
+    library now occupies the target slot.
+
+    Faces whose part id exceeds "Max Part ID" are left alone and reported rather than
+    remapped - the original tool does the same, since the destination library may not have
+    an entry that high and pointing a face at a rectangle that does not exist would be
+    worse than leaving it. Raise the limit only if you know the target library is as
+    large.
+
+    Writes straight to the .RRF with the usual one-time .bak. Nothing about the geometry
+    changes, so no rebuild happens. Re-import afterwards to see the result - the loaded
+    materials still reference the old libraries."""
+
+    bl_idname = "mesh.pe_remap_texture_library"
+    bl_label = "PE: Remap Texture Library (slot -> slot)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    old_slot: IntProperty(name="From Slot", description="Library slot to move faces off",
+                          default=0, min=0, max=31)
+    new_slot: IntProperty(name="To Slot", description="Library slot to move them onto",
+                          default=1, min=0, max=31)
+    max_id: IntProperty(name="Max Part ID",
+                        description="Faces with a part id above this are left alone and "
+                                    "reported, as the target library may not have an entry "
+                                    "that high",
+                        default=4095, min=0, max=4095)
+    whole_model: BoolProperty(name="All Parts",
+                              description="Apply to every part of the model, not just this "
+                                          "one - a .RRF holds the whole vehicle",
+                              default=True)
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == "MESH" and "pe_rrf_filepath" in obj \
+            and "pe_part_index" in obj
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        obj = context.active_object
+        rrf_filepath = obj["pe_rrf_filepath"]
+        if self.old_slot == self.new_slot:
+            self.report({"WARNING"}, "From and To are the same slot - nothing to do")
+            return {"CANCELLED"}
+        try:
+            data = bytearray(read_rrf_raw(rrf_filepath))
+        except OSError as e:
+            self.report({"ERROR"}, "Could not read %s: %s" % (rrf_filepath, e))
+            return {"CANCELLED"}
+
+        objCount = struct.unpack_from("<I", data, 4)[0]
+        parts = range(objCount) if self.whole_model else [obj["pe_part_index"]]
+        total_remapped = total_skipped = 0
+        for p in parts:
+            try:
+                r, sk = remap_part_library(data, p, self.old_slot, self.new_slot, self.max_id)
+            except (struct.error, IndexError):
+                continue
+            total_remapped += r
+            total_skipped += sk
+
+        if not total_remapped and not total_skipped:
+            self.report({"WARNING"}, "No faces are using slot %d - nothing written"
+                        % self.old_slot)
+            return {"CANCELLED"}
+
+        _backup_once(rrf_filepath)
+        write_rrf_raw(rrf_filepath, bytes(data))
+        msg = "Remapped %d face(s) from slot %d to %d in %s" % (
+            total_remapped, self.old_slot, self.new_slot, os.path.basename(rrf_filepath))
+        if total_skipped:
+            msg += " - %d left alone (part id above %d)" % (total_skipped, self.max_id)
+        msg += ". Re-import to see the change."
+        self.report({"INFO"}, msg)
+        return {"FINISHED"}
+
+
 class MESH_OT_pe_move_face_draw_order(bpy.types.Operator):
     """Moves the selected face(s) one step earlier or later in this part's draw order.
 
@@ -4825,6 +4967,7 @@ def menu_func_detach_face(self, context):
     self.layout.operator(MESH_OT_pe_write_vertex_positions.bl_idname, icon="VERTEXSEL")
     self.layout.operator(MESH_OT_pe_delete_faces.bl_idname, icon="TRASH")
     self.layout.operator(MESH_OT_pe_set_part_attribute.bl_idname, icon="MODIFIER")
+    self.layout.operator(MESH_OT_pe_remap_texture_library.bl_idname, icon="FILE_REFRESH")
     self.layout.operator(MESH_OT_pe_move_face_draw_order.bl_idname, icon="SORTSIZE")
     self.layout.operator(MESH_OT_pe_validate_model.bl_idname, icon="CHECKMARK")
     self.layout.operator(MESH_OT_pe_write_mesh.bl_idname, icon="EXPORT")
@@ -4838,6 +4981,7 @@ def register():
     bpy.utils.register_class(MESH_OT_pe_set_face_crop)
     bpy.utils.register_class(MESH_OT_pe_flip_face_texture)
     bpy.utils.register_class(MESH_OT_pe_give_private_skin)
+    bpy.utils.register_class(MESH_OT_pe_remap_texture_library)
     bpy.utils.register_class(MESH_OT_pe_move_face_draw_order)
     bpy.utils.register_class(MESH_OT_pe_validate_model)
     bpy.utils.register_class(MESH_OT_pe_set_part_attribute)
@@ -4854,6 +4998,7 @@ def unregister():
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     bpy.utils.unregister_class(MESH_OT_pe_delete_faces)
+    bpy.utils.unregister_class(MESH_OT_pe_remap_texture_library)
     bpy.utils.unregister_class(MESH_OT_pe_move_face_draw_order)
     bpy.utils.unregister_class(MESH_OT_pe_validate_model)
     bpy.utils.unregister_class(MESH_OT_pe_set_part_attribute)

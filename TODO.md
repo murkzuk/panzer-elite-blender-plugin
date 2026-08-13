@@ -4,6 +4,23 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [x] **Texture-library remap (ObjEdit's ReNumTLB) - built 2026-08-12.**
+  `MESH_OT_pe_remap_texture_library` repoints a model's faces from one library slot to
+  another, for moving a vehicle onto a different theatre's libraries without re-texturing
+  it face by face. Reproduces the real function including its safety behaviour: faces
+  whose part id exceeds the target library's maximum are left alone and reported rather
+  than pointed at a rectangle that may not exist.
+
+  Added `decode_texture_offset()` / `encode_texture_offset()` as the shared, correct
+  encoding (slot bits 12-15, part id bits 0-11, plus the 32-library extension). Verified
+  by round-tripping **115,613 real textured faces with zero mismatches**, which also
+  measured slot use directly: real content uses slots up to 23, with **28,772 faces in
+  slots 16+** - the extension that had been invisible to this plugin until today.
+
+  A real remap on PantherG moved exactly 3,579 faces from slot 15 to 7, skipped none, and
+  changed 3,579 bytes - one per face, since only the slot nibble moves - with the file
+  size unchanged.
+
 - [x] **Texture resolution: the 32-library extension - found and fixed 2026-08-12. Large
   real improvement.** Reading `rrReNumTLB()` while scoping a library-remap feature turned
   up how the engine actually decodes `textureOfset`: slot = bits 12-15, part = bits 0-11,
