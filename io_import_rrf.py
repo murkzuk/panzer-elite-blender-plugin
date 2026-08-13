@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 48, 0),
+    "version": (0, 49, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -3423,6 +3423,51 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
                             if filled:
                                 detect_msg += (" + inferred slot(s) %s the .RRI cannot name"
                                                % ", ".join(str(x) for x in filled))
+
+                    # A named slot can still come up short. The .RRI names the right
+                    # library for the slot, yet some of that slot's faces use ids the
+                    # library does not contain - a real Normandy M4a3 has one such id (23)
+                    # shared by 38 faces, which left them magenta while the model rendered
+                    # correctly everywhere else.
+                    #
+                    # The game never hits this because it loads the theatre's libraries as
+                    # a SET, so any of them can supply an id. Rather than widen every .RRI
+                    # to list the whole set - which makes ObjEdit load libraries it does
+                    # not need, and trip its own "Texture ID Too High!" check on REDUX
+                    # libraries that contain ids above 2047 - keep the .RRI narrow and add
+                    # the extra libraries here, parked at spare high keys where they can
+                    # never be mistaken for a real slot. Resolution tries the face's own
+                    # slot first, so the .RRI still wins wherever it can answer.
+                    unresolved_ids = set()
+                    for _p in parts:
+                        for _t in (_p.face_texture_id or []):
+                            if _t is None:
+                                continue
+                            _u, _sl, _pid = decode_texture_offset(_t)
+                            src = slot_sources.get(_sl)
+                            if src and _pid not in src[0]:
+                                unresolved_ids.add(_pid)
+                    if unresolved_ids:
+                        folder = default_texture_folder(self.filepath)
+                        if folder:
+                            try:
+                                extra, _rep = assign_libraries_to_slots(folder, parts)
+                            except Exception:
+                                extra = {}
+                            spare = 1000
+                            added = 0
+                            for _sl, entry in sorted(extra.items()):
+                                if entry[0] and (unresolved_ids & set(entry[0])):
+                                    while spare in slot_sources:
+                                        spare += 1
+                                    slot_sources[spare] = entry
+                                    spare += 1
+                                    added += 1
+                            if added:
+                                detect_msg += (" + %d fallback librar%s for %d id(s) the "
+                                               "named library lacks"
+                                               % (added, "y" if added == 1 else "ies",
+                                                  len(unresolved_ids)))
             except Exception as e:
                 self.report({"WARNING"}, f"Could not read .RRI ({e}) - falling back")
 

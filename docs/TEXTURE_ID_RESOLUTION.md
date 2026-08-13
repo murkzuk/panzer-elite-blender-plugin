@@ -392,3 +392,43 @@ Note the tool had to learn the same lesson as the importer: it computed `used` v
 `slots_used_by(parts)` with no availability set, so it kept reporting the phantom slot 16
 as missing and skipping models the resolver could already handle. Both sides must share
 the availability knowledge.
+
+## v0.49.0: narrow .RRI + a fallback for ids the named library lacks
+
+User report: after the batch write, ObjEdit raised **"Texture ID Too High!"** on Normandy
+models (Psw222 and PantherG still rendered; M3 did not).
+
+The check is ObjEdit's own, in `ImageLibUnit.pas`, and it inspects a **loaded library's
+entries**, not the `.RRI`:
+
+```pascal
+if libList[libCount].libParts[i].id and (MAX_PARTS-1) > MAX_LIB_PARTS - 1 then
+   Application.MessageBox('Texture ID Too High!', 'ERROR', MB_OK );
+```
+
+i.e. it fires when any loaded library holds an entry with `(id mod 4096) > 2047`.
+
+**Cause: writing the whole theatre set made ObjEdit load libraries the model does not
+need.** No stock Normandy library trips the check - but ObjEdit resolves the `.RRI`
+against **its own folder**, and the user's OE_2 `Texture/` holds an extended REDUX set
+(Normandy1..14) in which `Normandy4.tlb` and `Normandy8.TLB` have **113 high-id entries
+each**. Listing the full set pulled those in for no benefit.
+
+### Fix, both halves
+
+1. **`write_rri_batch.py` now writes only the slots a model uses** (`--full-set` opts back
+   in). The four models checked each use exactly one slot, so their `.RRI` lists one
+   library - nothing spurious for ObjEdit to load.
+2. **The importer supplements a narrow `.RRI`** when a *named* slot's library lacks some
+   of that slot's ids - the case that made the narrow version regress before (M4a3: one id
+   shared by 38 faces). Extra libraries are parked at spare high keys, so the `.RRI` still
+   wins wherever it can answer. Note this is distinct from the pre-existing
+   "slot the .RRI cannot name" inference; that handles missing *slots*, this handles
+   missing *ids* within a present slot.
+
+Verified: M4a3, Psw222, PantherG and M3 all import with **0 unresolved**, each `.RRI`
+listing a single library.
+
+Rewritten across the install: Normandy 259, Italy 370, Desert 318. Originals (pre-2020
+timestamps) untouched throughout - the genuine ones are dated 1999, which makes them
+trivially separable from generated ones.

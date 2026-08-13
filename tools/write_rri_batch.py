@@ -72,6 +72,7 @@ def main():
     ap.add_argument("folder", help="folder of .RRF models (a theatre folder, or an install root with --recursive)")
     ap.add_argument("--write", action="store_true", help="actually write files (default is a dry run)")
     ap.add_argument("--force", action="store_true", help="overwrite an existing .RRI (NOT recommended - a real .RRI outranks the rule)")
+    ap.add_argument("--full-set", action="store_true", help="list the whole theatre set rather than only the slots the model uses (makes ObjEdit load libraries it does not need, which can trip its 'Texture ID Too High!' check)")
     ap.add_argument("--partial", action="store_true", help="write even when some slots have no library on disk")
     ap.add_argument("--recursive", action="store_true", help="walk subfolders, using each model's own folder to pick its theatre")
     ap.add_argument("--texture-folder", default=None, help="override the Texture folder")
@@ -140,7 +141,7 @@ def main():
         # 38 wanted a single id (23) that Normandy2 lacks but the rest of the Normandy set
         # has. Listing the set fixes it, and gives ObjEdit everything the game would have.
         slots = {}
-        for slot_idx in range(len(THEATRE_SET_RANGE)):
+        for slot_idx in (range(len(THEATRE_SET_RANGE)) if args.full_set else ()):
             # Compare lowercase on BOTH sides - `theatre` is capitalised ("Normandy") and
             # real installs mix extension case (Normandy2.tlb / Normandy3.TLB).
             wanted = ("%s%d.tlb" % (theatre, slot_idx + 1)).lower()
