@@ -197,6 +197,7 @@ def main():
             return _libcache[path]
 
         repaired = []
+        unresolvable = []
         for _sl, _ids_needed in need_by_slot.items():
             chosen = slots.get(_sl)
             cov = 0.0
@@ -217,15 +218,27 @@ def main():
                         best = (c, _p2)
             except OSError:
                 pass
-            if best[1]:
-                slots[_sl] = (os.path.abspath(best[1]) if args.absolute
-                              else os.path.join("texture", os.path.basename(best[1])))
-                repaired.append("slot %d %.0f%%->%.0f%% via %s"
-                                % (_sl, cov * 100, best[0] * 100, os.path.basename(best[1])))
+            # DO NOT substitute a library merely because it shares ids.
+            #
+            # That is the false-friend failure this project already documented: many
+            # libraries reuse the same id numbers for completely different artwork, so a
+            # high overlap score is not evidence of the right library. Doing it here put
+            # M4.tlb (57% overlap) on M3Gmc and painted a halftrack with cockpit
+            # instrument dials - textured, plausible at a glance, and wrong.
+            #
+            # When the theatre rule's library genuinely does not hold the ids, the honest
+            # outcome is NO .RRI: ObjEdit then says "No RRI file found" and shows the model
+            # untextured, which is visibly unresolved rather than convincingly wrong.
+            unresolvable.append("slot %d (%.0f%% in %s)"
+                                % (_sl, cov * 100,
+                                   os.path.basename(slots.get(_sl) or "-")))
 
+        if unresolvable:
+            print("  skip  %-42s no library on disk holds its ids: %s"
+                  % (os.path.basename(m), "; ".join(unresolvable)))
+            skipped_unresolved += 1
+            continue
         desc = ", ".join("%d=%s" % (s, os.path.basename(p)) for s, p in sorted(slots.items()))
-        if repaired:
-            desc += "   [rule overridden: %s]" % "; ".join(repaired)
         print("  %s  %-42s %s" % ("WROTE" if args.write else " ok  ", os.path.basename(m), desc))
         if args.write:
             try:

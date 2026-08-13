@@ -623,3 +623,24 @@ different library.
 **Lesson: a rule derived from a naming convention should be checked against the data it
 claims to explain.** The theatre rule was a genuine discovery and remains correct for the
 overwhelming majority, but shipping it unverified silently wrote 81 useless files.
+
+### Correction: substituting a "best-covering" library was the WRONG repair
+
+The coverage-verification above was right to detect the problem and wrong in how it fixed
+it. Substituting whichever library shared the most ids put `M4.tlb` (57% overlap) on
+`M3Gmc` and painted a halftrack with **cockpit instrument dials** - textured, plausible at
+a glance, and completely wrong.
+
+That is the false-friend failure this very document already warned about: many libraries
+reuse the same id numbers for unrelated artwork, so a high overlap score is not evidence.
+It is the same trap that made auto-detect prefer `Italy5` (100%) over the correct
+`Normandy2` (98%).
+
+**The writer now SKIPS instead of substituting.** When the theatre rule's library does not
+hold a slot's ids, no .RRI is written; ObjEdit then reports "No RRI file found" and shows
+the model untextured. Visibly unresolved beats convincingly wrong - an untextured model
+tells the truth, a mis-textured one does not.
+
+Final state: Normandy 259 written, Italy 370, **Desert 220 written / 98 skipped**. Those
+98 reference ids that no library in the install holds; they need their real library
+locating, not a guess.
