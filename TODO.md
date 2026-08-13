@@ -4,6 +4,27 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ---
 
+- [x] **"Jumbled textures" finally solved - the per-face crop ORIGIN was never read.
+  2026-08-12.** The user's standing complaint ("this is our Achilles heel") turned out to
+  be one missing field.
+
+  A face's `textureOfset` carries more than an id: bits 0-11 are the part id, 12-15 the
+  library slot, and **bits 16-23 are the crop origin within the entry, in 16px units**.
+  `rrUsedSelection()` (Rrdwire.c) spells the all-zero-corner fallback out exactly:
+  `StartX = ((TexInfo>>20)&0xf)*16; StartY = ((TexInfo>>16)&0xf)*16`, with the size from
+  materialInfo. This importer read the size and assumed the origin was always (0,0).
+
+  That is invisible while each face has its own entry and catastrophic once faces share
+  one. On a real Italy Tiger **all 4,785 faces use the all-zero-corner path, and 4,256 of
+  them reference just TWO entries** - large sheets each face crops a different window out
+  of. Every one sampled the same top-left corner at a different size, producing the
+  overlapping patchwork users kept reporting.
+
+  Fixed, and the same Tiger now renders with coherent camo, clean panel boundaries and a
+  correctly-placed Balkenkreuz. Full layout written up in RRF_FORMAT.md.
+
+  Still open: the running gear renders dark red-brown and still looks wrong.
+
 - [x] **Jumbled textures on multi-library models - real cause found and fixed 2026-08-12.**
   User report: "the TLB import still brings in jumbled textures... we are not right on
   reading the texture data from the RRF". Correct on both counts.

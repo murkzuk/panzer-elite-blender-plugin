@@ -241,3 +241,45 @@ literally (sampling one atlas pixel for the whole face) produces a flat, blocky,
 stretched-looking result instead of the real texture. The correct fallback is to use the
 assigned entry's **full rectangle** instead, with the same corner-role order above:
 `v1=(sizeX-1,0)`, `v2=(0,0)`, `v3=(0,sizeY-1)`, `textureHalf=(sizeX-1,sizeY-1)`.
+
+
+## textureOfset: the complete layout (corrected 2026-08-12)
+
+A face's `textureOfset` is not just "an id". Confirmed from `rrUsedSelection()` and
+`rrReNumTLB()` (both real engine source), and from `rrSetTexture()` on the write side:
+
+| Bits | Meaning |
+|---|---|
+| 0-11 | part id within the library |
+| 12-15 | library slot |
+| 16-19 | crop origin **Y** within the entry, in 16px units |
+| 20-23 | crop origin **X** within the entry, in 16px units |
+| 31 | "is textured" flag |
+
+Plus the 32-library extension: a part id above 2047 means the real slot is `slot+16` and
+the real id is `id-2048`.
+
+### The all-zero-corner case is the normal case, and it needs BOTH halves
+
+Essentially every real face stores `(0,0)` in all four corner fields - a real Italy
+Tiger has **4,785 of 4,785** faces like that. Such a face's crop rectangle comes from
+`rrUsedSelection()`'s own fallback branch:
+
+```c
+SizeX  = ((TexInfo2 >> 4) + 1)*16;      // size,   from materialInfo bits 8-15
+SizeY  = ((TexInfo2 & 0xf) + 1)*16;
+StartX = ((TexInfo >> 20) & 0xf) * 16;  // ORIGIN, from textureOfset bits 20-23
+StartY = ((TexInfo >> 16) & 0xf) * 16;  //         and bits 16-19
+```
+
+**Reading the size but not the origin is the single most damaging mistake possible
+here**, and this importer made it for a long time. It is invisible while each face has
+its own entry, and catastrophic once faces share one: on that Tiger, 4,256 of 4,785
+faces reference just **two** entries - large sheets that each face crops a different
+window out of. With the origin assumed to be (0,0) every one of them sampled the same
+top-left corner at a different size, which is exactly the overlapping-patchwork
+appearance users reported as "jumbled textures".
+
+Faces that *do* carry explicit corners use the other branch, where each stored value is
+one less than the real one (`if(SizeX != 0) SizeX++`), matching how `rrSetTexture()`
+writes them (`xSize = sx - 1`).

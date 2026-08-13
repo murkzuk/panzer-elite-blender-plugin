@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 40, 0),
+    "version": (0, 41, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -1647,7 +1647,19 @@ def _read_mesh_lod0(data, mesh_off):
             # FSizeX=(((materialInfo&0xf00)>>8)+1)*16, FSizeY=(((materialInfo&0xf000)>>12)+1)*16.
             crop_size_x = (((materialInfo & 0x0F00) >> 8) + 1) * 16
             crop_size_y = (((materialInfo & 0xF000) >> 12) + 1) * 16
-            face_crop_size.append((crop_size_x, crop_size_y))
+            # ...and where inside the entry that crop STARTS. This lives in
+            # textureOfset bits 16-23, in 16px units, and had been assumed to be (0,0)
+            # for every face - see rrUsedSelection() (Rrdwire.c), whose all-zero-corner
+            # branch reads exactly:
+            #     StartX = ((TexInfo>>20)&0xf)*16;  StartY = ((TexInfo>>16)&0xf)*16;
+            # Getting this wrong is invisible when each face has its own entry, and
+            # catastrophic when many faces share one: they all sampled the same top-left
+            # corner of a large shared sheet at different sizes, which is what produced
+            # the overlapping-patchwork look on real vehicles. A real Tiger has 4,256 of
+            # its 4,785 faces sharing just two entries.
+            crop_start_x = ((textureOfset >> 20) & 0xF) * 16
+            crop_start_y = ((textureOfset >> 16) & 0xF) * 16
+            face_crop_size.append((crop_size_x, crop_size_y, crop_start_x, crop_start_y))
         else:
             face_texture_id.append(None)
             face_uv_corners.append(None)
@@ -2903,10 +2915,23 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_f
                         # being shared by several faces, each using its own smaller
                         # sub-tile of it, not the whole thing every time).
                         if all(c == (0, 0) for c in corners):
-                            crop_size = part.face_crop_size[poly.index]
-                            crop_x = min(crop_size[0], sizeX) if crop_size else sizeX
-                            crop_y = min(crop_size[1], sizeY) if crop_size else sizeY
-                            full_rect = [(crop_x - 1, 0), (0, 0), (0, crop_y - 1), (crop_x - 1, crop_y - 1)]
+                            # Crop rectangle for a face with no explicit corners: origin
+                            # from textureOfset bits 16-23, size from materialInfo -
+                            # exactly rrUsedSelection()'s own all-zero branch. The origin
+                            # was previously assumed (0, 0), which is why faces sharing a
+                            # large entry all sampled its top-left corner.
+                            crop = part.face_crop_size[poly.index]
+                            if crop:
+                                crop_w, crop_h, start_x, start_y = crop
+                            else:
+                                crop_w, crop_h, start_x, start_y = sizeX, sizeY, 0, 0
+                            start_x = min(start_x, max(sizeX - 1, 0))
+                            start_y = min(start_y, max(sizeY - 1, 0))
+                            crop_x = min(crop_w, sizeX - start_x)
+                            crop_y = min(crop_h, sizeY - start_y)
+                            x0, y0 = start_x, start_y
+                            x1, y1 = start_x + crop_x - 1, start_y + crop_y - 1
+                            full_rect = [(x1, y0), (x0, y0), (x0, y1), (x1, y1)]
                             corners = full_rect[:len(corners)]
                         for loop_index, (lx, ly) in zip(poly.loop_indices, corners):
                             atlas_x = posX * 16 + lx
