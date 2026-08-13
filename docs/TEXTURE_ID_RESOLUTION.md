@@ -283,3 +283,32 @@ right, with 38 faces (12%) still unresolved, presumably needing a second library
 - This also explains why ObjEdit looks broken on models that play fine: ObjEdit needs an
   `.RRI`, and almost none exist. **Generating `.RRI` files from the theatre rule would fix
   those models in ObjEdit too**, not just in Blender.
+
+### Implemented (v0.47.0)
+
+- `theatre_prefix_from_path()` reads the theatre from the model's own folder
+  (`Normandy_Obj` -> `Normandy`), so the rule applies with no user input.
+- `slots_used_by()` recovers the slots a model's faces actually name.
+- `theatre_set_libraries()` resolves `slot N -> <Theatre>(N+1).TLB`.
+- The importer applies the rule **after** scoring and lets it override, keeping the scored
+  matches as fallback for slots the rule cannot fill (buildings reference libraries that
+  are not in `Texture/` at all). On the Normandy M4a3 this gives a correct Sherman with
+  **0 unresolved faces** - better than a hand-written `.RRI` naming only Normandy2, which
+  left 38 unresolved, because the fallback still covers the ids Normandy2 lacks.
+- The import report now names the library actually **used**, not merely what scoring
+  shortlisted. It previously reported "Italy5.TLB" on a model it had correctly painted
+  from Normandy2.tlb.
+
+Gotcha worth keeping: real installs mix case (`Normandy2.tlb`, `Normandy3.TLB`), so the
+on-disk lookup must be case-insensitive. Getting that wrong made the rule silently do
+nothing while still reporting success.
+
+### tools/write_rri_batch.py
+
+Writes `.RRI` files across a folder from the same rule, so **ObjEdit** stops showing
+untextured models that the game renders perfectly. Dry run by default; never overwrites an
+existing `.RRI` without `--force` (a shipped `.RRI` is better evidence than any rule);
+skips models whose slots have no library on disk unless `--partial`.
+
+Dry run over `K:\Panzer Elite\Normandy_Obj`: **264 of 267 models would get one**, 2 already
+had one and were left alone, 1 unresolved.

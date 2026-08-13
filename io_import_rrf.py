@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 46, 0),
+    "version": (0, 47, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -814,6 +814,73 @@ def remap_part_library(data, part_index, old_slot, new_slot, max_id=4095, lod=0)
         struct.pack_into("<I", data, off, encode_texture_offset(upper, new_slot, part_id))
         remapped += 1
     return remapped, skipped
+
+
+def theatre_prefix_from_path(rrf_filepath):
+    """A model's own folder names its theatre: Normandy_Obj -> "Normandy". Returns None
+    when the folder is not a recognised theatre folder."""
+    folder = os.path.basename(os.path.dirname(os.path.abspath(rrf_filepath)))
+    key = folder.lower()
+    for prefix in ("Normandy", "Italy", "Desert", "CustomA", "CustomB", "CustomC"):
+        low = prefix.lower()
+        if key in (low, low + "_obj") or key.startswith(low + "_"):
+            return prefix
+    return None
+
+
+def slots_used_by(parts):
+    """The set of library slots a model's faces actually name."""
+    used = set()
+    for part in parts:
+        for tid in getattr(part, "face_texture_id", None) or ():
+            if tid is None:
+                continue
+            _upper, slot, _pid = decode_texture_offset(tid)
+            used.add(slot)
+    return used
+
+
+def theatre_set_libraries(search_folder, parts, theatre_prefix):
+    """Resolve libraries the way the GAME does: by position in the theatre's numbered set.
+
+    A real install's Texture folder is numbered per theatre - Normandy1..6, Italy1..6,
+    Desert1..8 - and the game loads that set in order, so a face's library slot is simply
+    an index into it:
+
+        slot N  ->  <Theatre>(N+1).TLB
+
+    Preferred over id-overlap scoring, which is not merely imprecise but actively
+    misleading: many libraries share ids, so a 100% score is not evidence. Measured on a
+    real Normandy M4a3 (slot 1) - scoring picked Italy5.TLB at 100% and produced
+    brown/white garbage, while this rule picks Normandy2.tlb at 98% and produces a correct
+    olive-drab Sherman. The lower-scoring library is the right one.
+
+    Returns ({slot: (tlb_parts, atlas_image_path, tlb_filepath)}, report_lines) - the same
+    shape as assign_libraries_to_slots(), so callers can merge the two.
+    """
+    resolved = {}
+    report = []
+    if not search_folder or not theatre_prefix:
+        return resolved, report
+    try:
+        existing = {n.lower(): os.path.join(search_folder, n)
+                    for n in os.listdir(search_folder) if n.lower().endswith(".tlb")}
+    except OSError:
+        return resolved, report
+    for slot in sorted(slots_used_by(parts)):
+        wanted = "%s%d.tlb" % (theatre_prefix, slot + 1)
+        # `existing` is keyed lowercase; real installs mix Normandy2.tlb / Normandy3.TLB.
+        path = existing.get(wanted.lower())
+        if not path:
+            report.append("theatre rule: slot %d wants %s - not on disk" % (slot, wanted))
+            continue
+        try:
+            tlb_parts = read_tlb(path)
+        except Exception:
+            continue
+        resolved[slot] = (tlb_parts, find_atlas_image(path), path)
+        report.append("theatre rule: slot %d -> %s" % (slot, os.path.basename(path)))
+    return resolved, report
 
 
 def assign_libraries_to_slots(search_folder, parts, name_prefix=None):
@@ -3320,6 +3387,28 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
                     # in fully textured but with textures from the wrong libraries.
                     built, slot_report = assign_libraries_to_slots(
                         search_folder, parts, name_prefix=name_prefix)
+
+                    # THEATRE RULE FIRST. The game does not search for libraries at all -
+                    # a real install's Texture folder is numbered per theatre
+                    # (Normandy1..6, Italy1..6, Desert1..8) and the game loads that set in
+                    # order, so a face's slot is an index into it: slot N ->
+                    # <Theatre>(N+1).TLB. Id-overlap scoring is actively misleading next to
+                    # this, because many libraries share ids so a 100% score is not
+                    # evidence: on a real Normandy M4a3 (slot 1) scoring picked Italy5.TLB
+                    # at 100% and produced brown/white garbage, while the rule picks
+                    # Normandy2.tlb at 98% and produces a correct Sherman. Scored matches
+                    # are kept for any slot the rule cannot fill (buildings, for instance,
+                    # reference libraries that are not in Texture/ at all).
+                    theatre_for_path = name_prefix or theatre_prefix_from_path(self.filepath)
+                    rule_used = {}
+                    if theatre_for_path:
+                        rule_built, rule_report = theatre_set_libraries(
+                            search_folder, parts, theatre_for_path)
+                        if rule_built:
+                            for slot, entry in rule_built.items():
+                                built[slot] = entry
+                                rule_used[slot] = entry[2]
+                            slot_report = list(slot_report) + list(rule_report)
                     skipped_no_atlas = []
                     # Per-slot assignment gets each face's OWN library right, but it picks
                     # only one library per used slot and so can cover fewer ids overall
@@ -3342,6 +3431,14 @@ class IMPORT_OT_rrf(bpy.types.Operator, ImportHelper):
                         self.report({"INFO"}, "Library slots: " + "; ".join(slot_report[:8]))
                     names = ", ".join(os.path.basename(path) for path, *_ in matches)
                     detect_msg = f" - auto-detected {len(matches)} .TLB(s){origin_note}{theatre_note}: {names}"
+                    # Report what was actually USED, not just what scoring shortlisted -
+                    # naming only the scored matches was misleading once the theatre rule
+                    # started overriding them (it reported "Italy5.TLB" on a model it had
+                    # correctly painted from Normandy2.tlb).
+                    if rule_used:
+                        rule_names = ", ".join(
+                            f"slot {s}={os.path.basename(p)}" for s, p in sorted(rule_used.items()))
+                        detect_msg += f" | theatre rule ({theatre_for_path}) took precedence: {rule_names}"
                     if skipped_no_atlas:
                         self.report({"WARNING"}, f"No matching _24.BMP/_8.BMP for: {', '.join(skipped_no_atlas)} - those libraries skipped")
                     if built:
