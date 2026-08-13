@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 43, 0),
+    "version": (0, 44, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -2691,7 +2691,15 @@ def detect_add_pivot_convention(parts):
     return {part.index: True for part in parts[1:] if part.vertices}
 
 
-COLORKEY_DISTANCE_THRESHOLD = 0.05  # Euclidean RGB distance (0-1 per channel, max ~1.73)
+# Euclidean RGB distance (0-1 per channel, max ~1.73), measured in the LINEAR space an
+# Image Texture node outputs - not in the 0-255 sRGB values the artwork is authored in.
+# That distinction is the whole reason this value is not 0.05: real PE key pixels are
+# commonly near-white rather than pure white (CustomA1's road-wheel entry 391 keys on
+# (250,250,250)), and sRGB 250 is linear 0.9559, so its distance from white is 0.0764 -
+# over a 0.05 threshold, leaving every road wheel sitting on an opaque white box.
+# 0.12 covers keys down to about sRGB 245 while staying far from real paint: the lightest
+# sand camo here is ~(210,190,150), a linear distance of ~0.93.
+COLORKEY_DISTANCE_THRESHOLD = 0.12
 
 
 def _build_material(root_name, image_path, tlb_filepath=None, tlb_confidence=None, use_colorkey=True, colorkey_color=(1.0, 1.0, 1.0)):

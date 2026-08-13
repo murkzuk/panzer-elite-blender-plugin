@@ -246,3 +246,36 @@ A/B-ing two variants by overwriting the `.py` between runs silently ran the **sa
 bytecode twice** and reported a perfect 0-pixel difference. Delete the `.pyc` between
 runs, and treat "the change had literally zero effect" as a signal to check the cache
 before believing it.
+
+---
+
+## UPDATE 2026-08-13: the colour key was failing on near-white art (v0.44.0)
+
+Found by rendering `CustomA/Sdkfz184.RRF` side-on and comparing against ObjEdit's own
+3D View of the same model. Every road wheel and drive sprocket sat on an opaque white
+box that ObjEdit does not show.
+
+**Cause: a colour-space mismatch, not a UV bug.** The key colour is compared against the
+Image Texture node's `Color` output, which Blender delivers in **linear** space, but the
+threshold was chosen for 0-255 sRGB artwork. PE key pixels are commonly *near*-white
+rather than pure white - CustomA1's road-wheel entry 391 keys on `(250,250,250)`. In
+sRGB that is 0.034 from white, comfortably inside the old 0.05 threshold; converted to
+linear it is 0.9559, a distance of **0.0764 - outside it**. So the key silently did
+nothing on exactly the art that needed it.
+
+Threshold raised to **0.12**, which covers keys down to about sRGB 245 while staying far
+from real paint (the lightest sand camo on this model is ~`(210,190,150)`, a linear
+distance of ~0.93).
+
+### What this model also settled
+
+- **Sdkfz184 has 0 explicit-corner faces** - all 396 take the all-zero path, like the
+  Italy Tiger. Explicit corners are common install-wide but absent from whole models.
+- **All 396 faces sit in slot 0**, so only one library matters here.
+- The **casemate roof really does tile**: 22 faces share texture id 9, every one a 16x16
+  crop at origin (0,0) inside a 64x64 entry. They are *meant* to be identical, and
+  ObjEdit's own render shows the same repeating grid. Not a bug - do not "fix" it.
+- The only crop overflows (24 faces, 6.1%) are Track faces, whose 48x192 crop against a
+  64x64 entry is deliberate tiling.
+- Auto-detect flagged itself as **not confident** on `CustomA1.TLB` (CustomC1 scores 98%
+  too). Worth remembering when judging any remaining colour difference on this model.
