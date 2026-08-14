@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 57, 0),
+    "version": (0, 58, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -514,7 +514,7 @@ def detect_uv_islands(bm, uv_layer, faces=None, epsilon=1e-5):
 
 
 def size_islands_to_tiles(uv_bboxes, min_tiles=1, max_tiles=None, budget_fraction=0.6,
-                          area_weights=None):
+                          area_weights=None, aspects=None):
     """Converts each island's UV-space bounding box (min_u, min_v, max_u, max_v) into a
     (tiles_w, tiles_h) size in 16px-tile units for a brand-new, empty atlas, preserving
     each island's own aspect ratio and relative size (islands that occupy more of the
@@ -562,7 +562,14 @@ def size_islands_to_tiles(uv_bboxes, min_tiles=1, max_tiles=None, budget_fractio
     warnings = []
     for i, (w, h) in enumerate(zip(widths, heights)):
         target_px_area = atlas_tile_budget * (areas[i] / total_area)
-        aspect = w / h
+        # `aspects`, when given, is the island's REAL shape (width/height measured in its
+        # own plane). The UV bbox aspect used otherwise is Smart UV Project's guess, and a
+        # poor one for single faces: a 3D-square face was handed a 27x187 rectangle, a 9x
+        # mismatch, and the texture stretched to fill it.
+        if aspects is not None and i < len(aspects) and aspects[i]:
+            aspect = float(aspects[i])
+        else:
+            aspect = w / h
         # target_px_area = px_w * px_h, px_w = aspect * px_h  =>  px_h = sqrt(target_px_area / aspect)
         px_h = max((target_px_area / aspect) ** 0.5, float(min_tiles))
         px_w = px_h * aspect
@@ -671,8 +678,42 @@ def plan_private_skin(bm, uv_layer, faces=None, budget_fraction=0.6, per_face=Fa
         weights.append(total)
     if not any(weights):
         weights = None
+    # Real in-plane proportions per island, so the rectangle is shaped like the thing it
+    # will be mapped onto. Only meaningful for a single face; a multi-face island keeps
+    # its UV bbox aspect.
+    aspects = None
+    if per_face:
+        aspects = []
+        for island in islands:
+            a = None
+            if len(island) == 1:
+                try:
+                    f = bm.faces[island[0]]
+                    n = f.normal.copy()
+                    verts = [v.co for v in f.verts]
+                    c = verts[0].copy()
+                    for v in verts[1:]:
+                        c = c + v
+                    c = c / len(verts)
+                    ax = verts[0] - c
+                    ax = ax - n * ax.dot(n)
+                    if ax.length > 1e-9:
+                        ax.normalize()
+                        ay = n.cross(ax)
+                        xs = [(v - c).dot(ax) for v in verts]
+                        ys = [(v - c).dot(ay) for v in verts]
+                        wf = max(xs) - min(xs)
+                        hf = max(ys) - min(ys)
+                        if wf > 1e-9 and hf > 1e-9:
+                            a = wf / hf
+                except Exception:
+                    a = None
+            aspects.append(a)
+        if not any(aspects):
+            aspects = None
+
     sizes, warnings = size_islands_to_tiles(bboxes, budget_fraction=budget_fraction,
-                                            area_weights=weights)
+                                            area_weights=weights, aspects=aspects)
     positions = pack_islands_shelf(sizes)
 
     plans = [

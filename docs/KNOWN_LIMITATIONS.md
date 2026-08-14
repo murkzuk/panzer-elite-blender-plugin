@@ -244,3 +244,30 @@ Turret_MG      area   1.0  budget 0.0005
 uneven by an artist's choice per face; ours had been uneven by accident.
 
 Still 141 entries, 141 axis-aligned rectangles, 0 overlapping face pairs, 0 unresolved.
+
+### v0.58.0: shape each rectangle like the FACE, not like its UV bbox
+
+User: "some faces are large but have a small island and vice versa" - still true after the
+density fix, because size and SHAPE are separate problems. The rectangle's aspect was taken
+from whatever UV bounding box Smart UV Project produced, which is a guess about the face's
+shape and sometimes badly wrong: a 3D-square face (aspect 1.24) was handed a 27x187
+rectangle, aspect 0.14 - a 9x mismatch, and the texture stretches to fill it.
+
+For a single face we do not need to guess. Projecting its vertices into its own plane gives
+the real proportions directly, and `size_islands_to_tiles(aspects=...)` now uses that in
+per-face mode. Multi-face islands keep the UV bbox aspect, which is all that is available
+for them.
+
+| aspect mismatch (1.0 = rectangle matches the face) | v0.57.0 | **v0.58.0** | stock PE |
+|---|---|---|---|
+| median | 1.31x | **1.13x** | 1.51x |
+| 90th percentile | 2.34x | **1.45x** | - |
+| worst | 5.59x | **1.84x** | 21.57x |
+| faces stretched over 2x | 23 (16%) | **0 (0%)** | 47 (34%) |
+
+Texel-density spread also improved, 52x -> 41x, since better-shaped rectangles waste less.
+
+The three sizing/shaping problems were separate and had to be fixed separately:
+**area weighting** (what size), **budget split by part area** (how much each part may
+claim), and **aspect from real geometry** (what shape). Fixing any one alone barely moved
+the numbers.
