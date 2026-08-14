@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 53, 0),
+    "version": (0, 54, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -756,6 +756,31 @@ def apply_private_skin(rrf_data, part_index, bm, uv_layer, plans, library, margi
                 slot = slot_of_vidx.get(file_vidx)
                 if slot is not None:
                     corners[slot] = (lx, ly)
+
+            # SNAP TO AN AXIS-ALIGNED RECTANGLE.
+            #
+            # Stock PE content is 100% axis-aligned rectangles - all 137 textured faces of
+            # a stock Psw222, no exceptions. The format stores a face's mapping as
+            # origin+size, so the engine reduces any quad to a rectangle and stretches the
+            # crop over it. A non-rectangular face therefore renders crisp in Blender
+            # (which honours all four corners) and as smears in ObjEdit. Smart UV Project
+            # was giving us 67% non-rectangular faces, which is the whole of the
+            # long-standing "private-skin stretching" problem.
+            #
+            # Snapping each vertex to the NEARER edge of its own face's UV bounding box
+            # forces a rectangle while keeping each vertex on the corner it already
+            # occupied, so orientation and winding are preserved. Faces whose unwrapped
+            # shape was not rectangular are mildly distorted - unavoidable, since the
+            # format cannot express them at all.
+            if corners:
+                cxs = [xy[0] for xy in corners.values()]
+                cys = [xy[1] for xy in corners.values()]
+                x0, x1 = min(cxs), max(cxs)
+                y0, y1 = min(cys), max(cys)
+                mid_x, mid_y = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+                corners = {k: (x0 if xy[0] <= mid_x else x1,
+                               y0 if xy[1] <= mid_y else y1)
+                           for k, xy in corners.items()}
 
             patch_face_corners_per_vertex(
                 rrf_data, part_index, 0, face_index,

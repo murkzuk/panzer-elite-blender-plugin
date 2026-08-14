@@ -131,3 +131,25 @@ Option 1 is a small change and testable immediately with the grid: re-audit shou
 The labelled grid (`tools/uvtest/make_uvtest.py`, or `tools/merge_private_skins.py` +
 `grid_into.py`) makes this a one-look check: crisp readable cells in ObjEdit means the
 mapping is expressible; streaks mean it is not.
+
+### Option 1 implemented (v0.54.0): snap every face to its UV bounding box
+
+`apply_private_skin()` now snaps each vertex to the nearer edge of its own face's UV
+bounding box before writing the corners. That forces an axis-aligned rectangle while
+keeping each vertex on the corner it already occupied, so orientation and winding survive.
+
+Result, re-audited on the same five-part merge:
+
+| model | textured faces | axis-aligned rectangles |
+|---|---|---|
+| stock `Psw222.RRF` | 137 | 137 (100%) |
+| private-skin merge, v0.53.0 | 141 | 46 (33%) |
+| **private-skin merge, v0.54.0** | 141 | **141 (100%)** |
+
+Now structurally identical to stock content. Faces whose unwrapped shape was not
+rectangular are mildly distorted - unavoidable, because the format cannot express them at
+all; the alternative was smearing.
+
+**Awaiting the ObjEdit check**: the labelled grid should now read as crisp cells rather
+than streaks. If it does, option 2 (a rectangle per face, sized to real proportions, as a
+PE artist would author it) becomes a refinement rather than a gamble.
