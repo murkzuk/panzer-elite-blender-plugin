@@ -297,3 +297,41 @@ exactly as `rrUsedSelection()` does and compares against Blender's UVs:
 The remaining 4 are faces where `slot_of_vidx` cannot resolve which loop is which - a face
 repeating a vertex index makes the mapping ambiguous - so they keep the unwrap's UVs and
 may still show a rotated rectangle. Worth chasing if a visible seam lands on one.
+
+### The continuity floor: 43% of quads are not rectangles
+
+After v0.59.0 Blender and the engine agree on the rectangle for 137/141 faces, yet a
+painted stroke still breaks up in ObjEdit. Measuring the geometry says why:
+
+```
+faces 141   triangles 8 (6%)   quads 133 (94%)
+quads within 10 deg of a true rectangle: 76 of 133 (57%)
+worst quads: 85, 76, 68 degrees off square
+```
+
+**43% of the quads are badly skewed** - trapezoids and parallelograms, not rectangles. The
+format stores an axis-aligned rectangle, so mapping it onto a trapezoid must distort. Both
+Blender and the engine distort, but not identically: a quad is rasterised as two triangles,
+and the two renderers differ in which diagonal they split on and whether interpolation is
+perspective-correct. Same rectangle, different result.
+
+**This is not fixable from the file.** It is the engine's rasteriser against Blender's.
+
+What it means in practice:
+
+- The **57% of faces that are near-rectangular** should match closely between the two.
+- Fine detail crossing a skewed face will not line up, and a continuous painted line is
+  the worst case for showing it.
+- Broad camouflage, weathering and per-face colour will look fine; precise decals spanning
+  several skewed faces will not.
+- The modelling-side lever is real: **faces built closer to rectangles reproduce better**.
+  That is also why stock content looks right - it was authored to the constraint.
+
+`tools/check_faces.py` reports the tri/quad split and how square the quads are, so any
+model can be checked before painting effort goes into it.
+
+### Test-grid palettes must contain nothing light
+
+ObjEdit keys light pixels as transparent, so pale greys in the labelled grid punched holes
+straight through the model. `tools/uvtest`/`grid_into.py` palettes are now capped at 125
+per channel - well below any plausible key colour. The earlier cap at 200 was not enough.
