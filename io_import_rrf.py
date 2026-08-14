@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 59, 0),
+    "version": (0, 60, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -854,7 +854,23 @@ def apply_private_skin(rrf_data, part_index, bm, uv_layer, plans, library, margi
                 cys = [xy[1] for xy in corners.values()]
                 rx0, ry0 = min(cxs), min(cys)
                 rx1, ry1 = max(cxs), max(cys)
+
+                # Use the WHOLE entry as the crop. The materialInfo/textureOfset encoding
+                # the renderer actually reads has only 16px granularity, so an inset
+                # rectangle like (2,2)-(62,46) cannot be expressed there and the two
+                # encodings would disagree - which is exactly what made a painted line
+                # come out disjointed. In per-face mode the entry belongs to this face
+                # alone, so taking all of it loses nothing and is 16-aligned by
+                # construction.
+                entry_w = sizeX
+                entry_h = sizeY
+                rx0, ry0 = 0, 0
+                rx1, ry1 = max(entry_w - 1, 0), max(entry_h - 1, 0)
+
                 patch_face_corners(rrf_data, part_index, 0, face_index, rx0, ry0, rx1, ry1)
+                # ...and the OTHER two places the same crop lives, so every reader agrees.
+                patch_face_crop_fields(rrf_data, part_index, 0, face_index,
+                                       entry_w, entry_h, 0, 0)
 
                 # Now REWRITE Blender's UVs to the engine's own reading of that rectangle,
                 # so the viewport shows what the game will draw. The corner each vertex
@@ -2085,6 +2101,32 @@ def read_face_corners(data, part_index, lod, face_index):
     if materialInfo & MAT_QUAD:
         corners.append(_corner_xy(textureHalf))
     return tuple(corners)
+
+
+def patch_face_crop_fields(data, part_index, lod, face_index, size_x, size_y,
+                           origin_x=0, origin_y=0):
+    """Writes the crop into materialInfo and textureOfset, matching rrSetTexture().
+
+    materialInfo bits 8-11 = (size_x/16)-1, bits 12-15 = (size_y/16)-1
+    textureOfset bits 24-27 = origin_x/16, bits 28-30 = origin_y/16 (bit 31 stays the
+    "is textured" flag).
+
+    Sizes and origins must be multiples of 16 - this encoding has no finer granularity.
+    Writing only the corner fields and leaving these stale is what made a painted line
+    come out disjointed: the renderer uses this path, because stock content only ever
+    populates it."""
+    off = _face_record_offset(data, part_index, lod, face_index)
+    v1, v2, v3, textureOfset, textureHalf, materialInfo = struct.unpack_from("<IIIIII", data, off)
+
+    nx = max(0, min(15, (int(size_x) // 16) - 1))
+    ny = max(0, min(15, (int(size_y) // 16) - 1))
+    materialInfo = (materialInfo & 0xFFFF00FF) | (nx << 8) | (ny << 12)
+    struct.pack_into("<I", data, off + 20, materialInfo)
+
+    ox = max(0, min(15, int(origin_x) // 16))
+    oy = max(0, min(7, int(origin_y) // 16))
+    textureOfset = (textureOfset & 0x80FFFFFF) | (ox << 24) | (oy << 28)
+    struct.pack_into("<I", data, off + 12, textureOfset)
 
 
 def patch_face_corners(data, part_index, lod, face_index, min_x, min_y, max_x, max_y):

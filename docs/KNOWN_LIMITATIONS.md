@@ -335,3 +335,44 @@ model can be checked before painting effort goes into it.
 ObjEdit keys light pixels as transparent, so pale greys in the labelled grid punched holes
 straight through the model. `tools/uvtest`/`grid_into.py` palettes are now capped at 125
 per channel - well below any plausible key colour. The earlier cap at 200 was not enough.
+
+### v0.60.0: a crop lives in THREE places - write all of them
+
+User, precisely: "distortion is fine but the line is **disjointed** not distorted". That
+distinction is what cracked it. Distortion would mean the rectangle is right and the
+mapping stretches; disjointed means the rectangle itself is wrong on some faces.
+
+Two of my own checks had been giving false comfort:
+
+- the first compared **bounding boxes**, which a rotated or mirrored mapping passes
+  identically;
+- the per-vertex version then reported 137/141 agreement, so the corner fields really were
+  right.
+
+The corners were never the problem. `rrSetTexture()` writes a face's crop into **three**
+places, and the private-skin writer only touched one:
+
+```c
+inf |= (((sx>>4)-1)<<8) | (((sy>>4)-1)<<12);   // materialInfo crop, 16px units
+viewF[v].textureOfset = texture;                // carries (orgY<<28)|(orgX<<24)
+viewF[v].v1 = ... (yStart<<24)|(xSize<<16);     // the corner fields
+```
+
+`materialInfo` still held the **original model's** crop. Measured across all 141 faces of a
+merged Psw222: explicit corners said `start(2,2) size 60x44` while materialInfo+origin said
+`start(0,0) size 32x32` - **0 of 141 agreed**. Stock content is 100% all-zero-corner, so the
+renderer only ever needed the materialInfo path and evidently uses it, drawing a stale
+32x32 patch from each entry's top-left. A different wrong crop per face is precisely a
+disjointed line.
+
+`patch_face_crop_fields()` now writes materialInfo and the textureOfset origin alongside
+the corners. The crop is also taken as the **whole entry** - that encoding has only 16px
+granularity, so the old 2px inset margin could not be expressed in it and the two readings
+could never agree. In per-face mode the entry belongs to one face, so using all of it costs
+nothing.
+
+**Result: 141 of 141 faces now agree between both encodings** (was 0), with per-vertex
+corner agreement still 137/141.
+
+**Lesson: a self-consistent check is not a correct one.** Both my checks passed while the
+file was wrong, because both only ever compared the writer against itself.
