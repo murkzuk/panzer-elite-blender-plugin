@@ -632,3 +632,33 @@ four duplicate `PE_FLAT_COLOR` slots. Building a per-mesh copy fixes it. Verifie
 material list is now `['<atlas>', 'PE_UNRESOLVED_TEXTURE', 'PE_FLAT_COLOR']` exactly.
 
 Regression: M4a3 and PantherG both still 321 faces / 0 unresolved.
+
+---
+
+## v0.61.0: v1 is the crop's TOP-LEFT, not top-right
+
+Settled by the per-face **F orientation test** (`tools/uvtest/orient_test.py`), which the
+user suggested after checkerboards proved too noisy to judge. Each face gets an
+asymmetric F, a red block at the crop origin and a green bar on the top edge - so a mirror
+or rotation is unmistakable rather than inferred.
+
+ObjEdit drew the F **upright and readable**; this add-on drew the same face's F
+**backwards**. ObjEdit reads the real file, so the file was right and the add-on's reading
+was mirrored.
+
+The corner roles had come from `rrSetTexture()`'s write order, which pins v1 to the
+top-RIGHT. That is how the *editor* packs the fields; `OBJHALX5.dll`, which actually draws
+them, has no source and assigns v1 to the top-LEFT. Both places this add-on assigns corners
+now match the engine:
+
+```
+v1 = top-left    v2 = top-right    v3 = bottom-right    textureHalf = bottom-left
+```
+
+**Why this took so long to see.** Every earlier check compared the add-on against itself -
+bounding boxes (which a mirror passes identically), then per-vertex corners (which agreed
+because reader and writer shared the same wrong convention). A mirror is invisible to any
+self-consistent test. It took an asymmetric glyph rendered by the real tool.
+
+**The general lesson, third time this session:** a self-consistent check proves nothing.
+Orientation in particular needs an asymmetric marker and an external renderer.

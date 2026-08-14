@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 60, 0),
+    "version": (0, 61, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -880,9 +880,11 @@ def apply_private_skin(rrf_data, part_index, bm, uv_layer, plans, library, margi
                 # the engine disagree on orientation for any face whose vertex order did
                 # not happen to match, which is why a stroke that flowed continuously in
                 # Blender broke into pieces in ObjEdit.
+                # v1 = top-LEFT, matching what the engine actually draws (see the
+                # importer's explicit-corner branch).
                 corner_for_slot = {
-                    "v1": (rx1, ry0), "v2": (rx0, ry0),
-                    "v3": (rx0, ry1), "textureHalf": (rx1, ry1),
+                    "v1": (rx0, ry0), "v2": (rx1, ry0),
+                    "v3": (rx1, ry1), "textureHalf": (rx0, ry1),
                 }
                 for loop in face.loops:
                     fvidx = loop.vert[vertex_index_layer] if vertex_index_layer is not None else None
@@ -3359,7 +3361,13 @@ def build_blender_objects(parts, collection, root_name, slot_sources=None, rrf_f
                             if e_sx and e_sy:
                                 x0, y0 = e_ox, e_oy
                                 x1, y1 = e_ox + e_sx - 1, e_oy + e_sy - 1
-                                rect = [(x1, y0), (x0, y0), (x0, y1), (x1, y1)]
+                                # v1 = top-LEFT. Verified against ObjEdit with the
+                                # per-face F orientation test: the engine draws the F
+                                # upright, this add-on drew it mirrored, so the file was
+                                # right and the reading was flipped. rrSetTexture()'s
+                                # write order suggested v1 = top-right, but the HAL that
+                                # renders has no source and disagrees.
+                                rect = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
                                 corners = rect[:len(corners)]
                         # Bind each corner to the FILE's vertex, not to the loop's
                         # position in the polygon.
