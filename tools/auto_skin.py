@@ -26,7 +26,19 @@ bpy.ops.preferences.addon_enable(module='io_import_rrf')
 bpy.ops.import_scene.pe_rrf(filepath=MODEL)
 
 meshes = [o for o in bpy.data.objects if o.type == "MESH" and len(o.data.polygons)]
-print("R: %d part(s) to process, atlas budget %.3f each" % (len(meshes), BUDGET))
+
+# Split the atlas budget by each part's REAL SURFACE AREA, not equally.
+#
+# An equal split gives a 4-face machine gun the same share as a 106-face hull, so its
+# tiny faces each land an enormous rectangle - measured at 27,989 texels per unit of area
+# against the hull's ~150, a 600x density spread. Weighting by area keeps texel density
+# roughly consistent across the whole vehicle.
+areas = {}
+for o in meshes:
+    areas[o.name] = sum(p.area for p in o.data.polygons) or 1e-9
+total_area = sum(areas.values())
+TOTAL_BUDGET = 0.55
+print("R: %d part(s), total atlas budget %.2f split by surface area" % (len(meshes), TOTAL_BUDGET))
 
 for ob in meshes:
     bpy.ops.object.select_all(action='DESELECT')
@@ -48,11 +60,14 @@ for ob in meshes:
         # Each part may claim only its share of the atlas, so the five private skins
         # can later be merged into ONE library. The default 0.6 assumes the part owns the
         # whole atlas, which overflows the merge five times over.
-        res = bpy.ops.mesh.pe_give_private_skin(budget_fraction=BUDGET, per_face=True)
+        share = max(0.01, min(0.95, TOTAL_BUDGET * areas[ob.name] / total_area))
+        res = bpy.ops.mesh.pe_give_private_skin(budget_fraction=share, per_face=True)
         status = str(res)
     except Exception as exc:
         status = "FAILED: %s" % exc
     bpy.ops.object.mode_set(mode='OBJECT')
-    print("R:   %-12s polys=%-4d -> %s" % (ob.name, len(ob.data.polygons), status))
+    print("R:   %-12s polys=%-4d area=%8.1f budget=%.4f -> %s"
+          % (ob.name, len(ob.data.polygons), areas[ob.name],
+             TOTAL_BUDGET * areas[ob.name] / total_area, status))
 
 print("R: done")

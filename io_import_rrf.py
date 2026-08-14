@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 56, 0),
+    "version": (0, 57, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -513,7 +513,8 @@ def detect_uv_islands(bm, uv_layer, faces=None, epsilon=1e-5):
     return list(islands.values())
 
 
-def size_islands_to_tiles(uv_bboxes, min_tiles=1, max_tiles=None, budget_fraction=0.6):
+def size_islands_to_tiles(uv_bboxes, min_tiles=1, max_tiles=None, budget_fraction=0.6,
+                          area_weights=None):
     """Converts each island's UV-space bounding box (min_u, min_v, max_u, max_v) into a
     (tiles_w, tiles_h) size in 16px-tile units for a brand-new, empty atlas, preserving
     each island's own aspect ratio and relative size (islands that occupy more of the
@@ -543,7 +544,14 @@ def size_islands_to_tiles(uv_bboxes, min_tiles=1, max_tiles=None, budget_fractio
 
     widths = [max(max_u - min_u, 1e-9) for min_u, min_v, max_u, max_v in uv_bboxes]
     heights = [max(max_v - min_v, 1e-9) for min_u, min_v, max_u, max_v in uv_bboxes]
-    areas = [w * h for w, h in zip(widths, heights)]
+    # `area_weights`, when given, is each island's REAL 3D surface area. The UV bbox area
+    # used otherwise is a poor proxy once faces have been snapped to rectangles - on a real
+    # Psw222 it handed a 6.75-area face and a 0.55-area face the same 297 texels. The bbox
+    # is still what sets each island's aspect below; only the size weighting changes.
+    if area_weights is not None and len(area_weights) == len(uv_bboxes):
+        areas = [max(float(a), 1e-9) for a in area_weights]
+    else:
+        areas = [w * h for w, h in zip(widths, heights)]
     total_area = sum(areas) or 1e-9
 
     atlas_tile_budget = ATLAS_GRID_WIDTH * ATLAS_GRID_HEIGHT * budget_fraction
@@ -650,7 +658,21 @@ def plan_private_skin(bm, uv_layer, faces=None, budget_fraction=0.6, per_face=Fa
     # moment several parts are merged into one library - five parts at 0.6 each need 300%
     # of an atlas and the merge runs out of space. Callers merging N parts should pass
     # roughly 0.6/N. (tools/merge_private_skins.py)
-    sizes, warnings = size_islands_to_tiles(bboxes, budget_fraction=budget_fraction)
+    # Real surface area per island, so a large panel gets proportionally more atlas than a
+    # small one - see size_islands_to_tiles(area_weights=...).
+    weights = []
+    for island in islands:
+        total = 0.0
+        for fi in island:
+            try:
+                total += bm.faces[fi].calc_area()
+            except Exception:
+                total += 0.0
+        weights.append(total)
+    if not any(weights):
+        weights = None
+    sizes, warnings = size_islands_to_tiles(bboxes, budget_fraction=budget_fraction,
+                                            area_weights=weights)
     positions = pack_islands_shelf(sizes)
 
     plans = [

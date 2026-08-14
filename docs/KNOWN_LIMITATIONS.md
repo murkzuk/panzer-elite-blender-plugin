@@ -215,3 +215,32 @@ with per-face rectangles - it is 141 disconnected patches.
 
 `per_face` is an operator property, default **False**, so the island behaviour is
 unchanged for anyone who wants it. `tools/auto_skin.py` passes `per_face=True`.
+
+### v0.57.0: texel density - size by real surface area, and split the budget by it
+
+User report: "some faces are large but have a small island and vice versa". Measured as
+texels per unit of 3D area, our spread was **637x**. Two causes, and only the second
+mattered much:
+
+1. **`size_islands_to_tiles()` weighted islands by UV bbox area**, a poor proxy once faces
+   are snapped to rectangles - a 6.75-area face and a 0.55-area face both got 297 texels.
+   Now takes `area_weights` and `plan_private_skin()` passes each island's real
+   `calc_area()`. On its own this only moved 637x -> 604x.
+
+2. **The atlas budget was split EQUALLY between parts.** A 4-face machine gun received the
+   same share as a 106-face hull, so its tiny faces each landed an enormous rectangle -
+   27,989 texels per unit against the hull's ~150. `tools/auto_skin.py` now splits the
+   budget by each part's surface area:
+
+```
+Psw222 (hull)  area 809.1  budget 0.4321
+Wheel          area 160.3  budget 0.0856
+Turret         area  53.6  budget 0.0286
+Main_Gun       area   5.8  budget 0.0031
+Turret_MG      area   1.0  budget 0.0005
+```
+
+**Result: 637x -> 52x**, which is more consistent than stock PE content (759x). Stock is
+uneven by an artist's choice per face; ours had been uneven by accident.
+
+Still 141 entries, 141 axis-aligned rectangles, 0 overlapping face pairs, 0 unresolved.
