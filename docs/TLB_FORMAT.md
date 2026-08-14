@@ -127,3 +127,41 @@ Helpers: `read_tlb_palette()`, `tlb_palette_to_rgb()`, `rgb_to_tlb_palette()`, a
 all-zero palette renders every painted pixel black regardless of what was painted -
 `new_tlb_library()` previously wrote 2048 zero bytes, which meant every private-skin
 library shipped with a black palette that disagreed with its own `_8.BMP`.
+
+## PALETTE INDEX 0 IS THE TRANSPARENT KEY
+
+Not a colour threshold - the **index**. Anything drawn with palette entry 0 is see-through
+in ObjEdit (and presumably the game) regardless of what colour that entry holds.
+
+Confirmed against stock content - every shipped atlas checked:
+
+| atlas | index 0 colour | share of the sheet |
+|---|---|---|
+| `Desert1_8.bmp` | (255,255,255) | 27.7% |
+| `Desert2_8.BMP` | (255,255,255) | 10.7% |
+| `Desert3_8.bmp` | (255,255,255) | **82.7%** |
+| `Desert4_8.bmp` | (255,255,255) | **84.0%** |
+| `Desert5_8.BMP` | (255,255,255) | 72.2% |
+| `Desert6_8.bmp` | (255,255,255) | 71.3% |
+
+Index 0 is white by convention and fills the empty space between packed entries - which is
+exactly what a transparent key is for.
+
+**How this was found, and two wrong turns it explains.** The user first reported "white is
+transparent in OE", which led to capping test-grid palettes below near-white - treating it
+as a *colour* problem. Then, with a dark grid whose background happened to be index 0, they
+reported "black is transparent in the oe". Both observations were the same fact: whatever
+sits at index 0 disappears.
+
+**Rules for any generated atlas:**
+
+- Reserve index 0. Never use it for visible pixels.
+- Set it to (255,255,255) to match stock.
+- Fill genuinely empty atlas space with it - that is what stock does, and it is why so much
+  of a real sheet is index 0.
+- Colour-capping is unnecessary. A near-white *visible* colour at index 40 renders fine;
+  the importer's own near-white colour key (COLORKEY_DISTANCE_THRESHOLD) is a separate,
+  Blender-side mechanism and does not match how the engine behaves.
+
+`tools/uvtest/orient_test.py` draws a per-face orientation test (F glyph, red origin
+corner, green top edge) and follows these rules.
