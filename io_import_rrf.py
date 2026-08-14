@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 54, 0),
+    "version": (0, 55, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -772,21 +772,17 @@ def apply_private_skin(rrf_data, part_index, bm, uv_layer, plans, library, margi
             # occupied, so orientation and winding are preserved. Faces whose unwrapped
             # shape was not rectangular are mildly distorted - unavoidable, since the
             # format cannot express them at all.
+            # The face is snapped to its own UV bounding box (real PE content is 100%
+            # axis-aligned rectangles - all 137 faces of a stock Psw222), and that
+            # rectangle is then written through patch_face_corners(), which packs it as
+            # ORIGIN+SIZE the way rrSetTexture() does. Writing per-vertex positions
+            # instead hands the engine a coordinate where it expects a width, and the
+            # texture smears across the face.
             if corners:
                 cxs = [xy[0] for xy in corners.values()]
                 cys = [xy[1] for xy in corners.values()]
-                x0, x1 = min(cxs), max(cxs)
-                y0, y1 = min(cys), max(cys)
-                mid_x, mid_y = (x0 + x1) / 2.0, (y0 + y1) / 2.0
-                corners = {k: (x0 if xy[0] <= mid_x else x1,
-                               y0 if xy[1] <= mid_y else y1)
-                           for k, xy in corners.items()}
-
-            patch_face_corners_per_vertex(
-                rrf_data, part_index, 0, face_index,
-                corners.get("v1", (0, 0)), corners.get("v2", (0, 0)), corners.get("v3", (0, 0)),
-                texture_half_xy=corners.get("textureHalf") if is_quad else None,
-            )
+                patch_face_corners(rrf_data, part_index, 0, face_index,
+                                   min(cxs), min(cys), max(cxs), max(cys))
             updated += 1
     return updated
 
@@ -2026,11 +2022,28 @@ def patch_face_corners(data, part_index, lod, face_index, min_x, min_y, max_x, m
     def _pack(field, x, y):
         return (field & 0xFFFF) | (y << 24) | (x << 16)
 
-    struct.pack_into("<I", data, off + 0, _pack(v1, max_x, min_y))   # v1 = top-right
-    struct.pack_into("<I", data, off + 4, _pack(v2, min_x, min_y))   # v2 = top-left
-    struct.pack_into("<I", data, off + 8, _pack(v3, min_x, max_y))   # v3 = bottom-left
+    # ORIGIN + SIZE, not four positions. rrSetTexture() (Rrdwire.c) writes
+    #   xStart = X-1 (when X != 0), xSize = sx-1
+    #   v1 = (yStart<<24)|(xSize <<16)      v2 = (yStart<<24)|(xStart<<16)
+    #   v3 = (ySize <<24)|(xStart<<16)      textureHalf = (ySize<<24)|(xSize<<16)
+    # and rrUsedSelection() reads it straight back that way. Packing the right edge
+    # (max_x) into v1 - which this function used to do - hands the engine a coordinate
+    # where it expects a width, so a 50px face at x=200 claims a 200px crop and smears.
+    # The two only coincide when a face starts at x=0, which is why it sometimes looked
+    # right.
+    x_start = max_x_local = 0
+    x_start = (min_x - 1) if min_x else 0
+    y_start = (min_y - 1) if min_y else 0
+    x_size = (max_x - min_x + 1)
+    y_size = (max_y - min_y + 1)
+    x_size = (x_size - 1) if x_size else 0
+    y_size = (y_size - 1) if y_size else 0
+
+    struct.pack_into("<I", data, off + 0, _pack(v1, x_size, y_start))
+    struct.pack_into("<I", data, off + 4, _pack(v2, x_start, y_start))
+    struct.pack_into("<I", data, off + 8, _pack(v3, x_start, y_size))
     if is_quad:
-        struct.pack_into("<I", data, off + 16, _pack(textureHalf, max_x, max_y))  # bottom-right
+        struct.pack_into("<I", data, off + 16, _pack(textureHalf, x_size, y_size))
 
 
 def patch_face_corners_per_vertex(data, part_index, lod, face_index, v1_xy, v2_xy, v3_xy, texture_half_xy=None):

@@ -153,3 +153,36 @@ all; the alternative was smearing.
 **Awaiting the ObjEdit check**: the labelled grid should now read as crisp cells rather
 than streaks. If it does, option 2 (a rectangle per face, sized to real proportions, as a
 PE artist would author it) becomes a refinement rather than a gamble.
+
+### v0.55.0: the actual bug - corners were written as POSITIONS, not ORIGIN+SIZE
+
+Snapping to rectangles (v0.54.0) was necessary but not sufficient: ObjEdit still smeared.
+The source answered it. `rrSetTexture()` (Rrdwire.c) packs a face's crop as **origin and
+size**:
+
+```c
+xStart = X - 1 (when X != 0);   xSize = sx - 1
+v1 = idx | (yStart<<24) | (xSize <<16)
+v2 = idx | (yStart<<24) | (xStart<<16)
+v3 = idx | (ySize <<24) | (xStart<<16)
+textureHalf = idx | (ySize<<24) | (xSize<<16)     [quads]
+```
+
+and `rrUsedSelection()` reads it straight back that way. **Both writers in this add-on
+packed positions instead** - `patch_face_corners()` put `max_x`, the right edge, into v1
+where the engine expects a width. A 50px-wide face sitting at x=200 therefore declared a
+200px crop, and the texture stretched across it. The two only coincide when a face starts
+at x=0, which is why some faces always looked fine.
+
+Fixed in `patch_face_corners()`, and `apply_private_skin()` now routes its
+already-rectangular faces through it rather than writing per-vertex positions.
+
+Verified by reading every face back **the engine's own way** (rrUsedSelection's explicit
+branch): **141 of 141 crops fit their entry, 0 do not.** User confirms the wheels are no
+longer smeared in ObjEdit, and the Blender render went from streaks to crisp labelled
+cells.
+
+**Correction to an earlier claim in this document:** it said Blender never reads the corner
+bytes back because `apply_private_skin` sets loop UVs directly. That is true only within
+the session that writes them - a fresh *import* of the saved .RRF does read them, and did
+show the same smearing. The renders were of re-imported files all along.
