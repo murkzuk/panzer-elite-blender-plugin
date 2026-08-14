@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 58, 0),
+    "version": (0, 59, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -852,8 +852,31 @@ def apply_private_skin(rrf_data, part_index, bm, uv_layer, plans, library, margi
             if corners:
                 cxs = [xy[0] for xy in corners.values()]
                 cys = [xy[1] for xy in corners.values()]
-                patch_face_corners(rrf_data, part_index, 0, face_index,
-                                   min(cxs), min(cys), max(cxs), max(cys))
+                rx0, ry0 = min(cxs), min(cys)
+                rx1, ry1 = max(cxs), max(cys)
+                patch_face_corners(rrf_data, part_index, 0, face_index, rx0, ry0, rx1, ry1)
+
+                # Now REWRITE Blender's UVs to the engine's own reading of that rectangle,
+                # so the viewport shows what the game will draw. The corner each vertex
+                # gets is fixed by the format - v1 top-right, v2 top-left, v3 bottom-left,
+                # textureHalf bottom-right - and follows the face's vertex order, which we
+                # do not control. Leaving the unwrap's UVs in place instead let Blender and
+                # the engine disagree on orientation for any face whose vertex order did
+                # not happen to match, which is why a stroke that flowed continuously in
+                # Blender broke into pieces in ObjEdit.
+                corner_for_slot = {
+                    "v1": (rx1, ry0), "v2": (rx0, ry0),
+                    "v3": (rx0, ry1), "textureHalf": (rx1, ry1),
+                }
+                for loop in face.loops:
+                    fvidx = loop.vert[vertex_index_layer] if vertex_index_layer is not None else None
+                    slot = slot_of_vidx.get(fvidx)
+                    target = corner_for_slot.get(slot)
+                    if target is None:
+                        continue
+                    ax = posX * ATLAS_TILE_SIZE + target[0]
+                    ay = posY * ATLAS_TILE_SIZE + target[1]
+                    loop[uv_layer].uv = (ax / ATLAS_WIDTH, 1.0 - ay / ATLAS_HEIGHT)
             updated += 1
     return updated
 

@@ -271,3 +271,29 @@ The three sizing/shaping problems were separate and had to be fixed separately:
 **area weighting** (what size), **budget split by part area** (how much each part may
 claim), and **aspect from real geometry** (what shape). Fixing any one alone barely moved
 the numbers.
+
+### v0.59.0: make Blender's UVs agree with the ENGINE's reading
+
+User, after painting a black stroke: "some faces are right but it is not the continuous
+flow of the blender black line". The stroke stayed continuous in Blender and broke into
+pieces in ObjEdit.
+
+Cause: the four corner fields **are** the rectangle's parameters (origin+size), not four
+independent positions, so which way the rectangle lands on a face is fixed by that face's
+vertex order - v1 top-right, v2 top-left, v3 bottom-left, textureHalf bottom-right - and we
+do not control it. Meanwhile `apply_private_skin` left Blender's UVs as the *unwrap* had
+them. On any face whose vertex order did not happen to match, the two disagreed about
+orientation: Blender painted a continuous stroke into a rectangle the engine then drew
+rotated.
+
+Fixed by rewriting Blender's UVs from the rectangle using the engine's own corner
+convention, so the viewport shows what the game will draw and paint lands where it will
+appear.
+
+Verified with `tools/check_uv_agree.py`, which reads each face's rect out of the .RRF
+exactly as `rrUsedSelection()` does and compares against Blender's UVs:
+**137 of 141 faces agree, 4 disagree.**
+
+The remaining 4 are faces where `slot_of_vidx` cannot resolve which loop is which - a face
+repeating a vertex index makes the mapping ambiguous - so they keep the unwrap's UVs and
+may still show a rotated rectangle. Worth chasing if a visible seam lands on one.
