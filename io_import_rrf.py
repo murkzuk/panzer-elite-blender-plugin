@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 52, 0),
+    "version": (0, 53, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -15,7 +15,7 @@ import math
 import bpy
 import bmesh
 from bpy_extras.io_utils import ImportHelper, ExportHelper
-from bpy.props import StringProperty, BoolProperty, EnumProperty, FloatVectorProperty, IntProperty
+from bpy.props import StringProperty, BoolProperty, EnumProperty, FloatVectorProperty, IntProperty, FloatProperty
 from mathutils import Matrix, Vector
 
 ATLAS_EXPECTED_SIZE = (256, 4096)
@@ -607,7 +607,7 @@ def pack_islands_shelf(sizes, grid_width=None, grid_height=None):
     return positions
 
 
-def plan_private_skin(bm, uv_layer, faces=None):
+def plan_private_skin(bm, uv_layer, faces=None, budget_fraction=0.6):
     """Planning step for "give this part its own private, freely-paintable skin"
     (TODO.md): given a mesh that already has a real UV unwrap (e.g. Smart UV Project),
     works out everything needed to move it onto a brand-new, dedicated .TLB atlas -
@@ -637,7 +637,12 @@ def plan_private_skin(bm, uv_layer, faces=None):
                 vs.append(v)
         bboxes.append((min(us), min(vs), max(us), max(vs)))
 
-    sizes, warnings = size_islands_to_tiles(bboxes)
+    # budget_fraction: how much of the atlas THIS part may claim. The default assumes the
+    # part owns the whole atlas, which is right for a single private skin and wrong the
+    # moment several parts are merged into one library - five parts at 0.6 each need 300%
+    # of an atlas and the merge runs out of space. Callers merging N parts should pass
+    # roughly 0.6/N. (tools/merge_private_skins.py)
+    sizes, warnings = size_islands_to_tiles(bboxes, budget_fraction=budget_fraction)
     positions = pack_islands_shelf(sizes)
 
     plans = [
@@ -4393,6 +4398,16 @@ class MESH_OT_pe_give_private_skin(bpy.types.Operator):
     bl_label = "PE: Give This Part a Private Skin"
     bl_options = {"REGISTER", "UNDO"}
 
+    budget_fraction: FloatProperty(
+        name="Atlas Budget",
+        description="How much of the 256x4096 atlas this part may claim. Leave at 0.6 for "
+                    "a single part. When several parts will be MERGED into one library "
+                    "later, divide by the number of parts (e.g. 0.12 for five) - otherwise "
+                    "each part sizes its islands as if it owned the whole atlas and the "
+                    "merge runs out of space",
+        default=0.6, min=0.01, max=0.95,
+    )
+
     @classmethod
     def poll(cls, context):
         obj = context.active_object
@@ -4423,7 +4438,7 @@ class MESH_OT_pe_give_private_skin(bpy.types.Operator):
             self.report({"ERROR"}, "Mesh has no UV layer - unwrap it first (e.g. Smart UV Project)")
             return {"CANCELLED"}
 
-        plans, size_warnings = plan_private_skin(bm, uv_layer)
+        plans, size_warnings = plan_private_skin(bm, uv_layer, budget_fraction=self.budget_fraction)
         if not plans:
             self.report({"WARNING"}, "No faces to give a private skin")
             return {"CANCELLED"}

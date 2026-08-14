@@ -179,3 +179,49 @@ Same ladder that has actually caught things on this project, in this order:
 Nothing above needs new format reverse-engineering except the collision-box and palette
 questions. The binary layouts are known; this is mostly construction work plus one real
 measurement programme (`sortList`).
+
+---
+
+## Working headless authoring loop (2026-08-14, v0.53.0)
+
+`pe_give_private_skin` alone cannot produce a loadable model: each part gets its own .TLB
+whose entry ids restart at 0, while every part's faces still name slot 0. Five parts =
+five libraries fighting over the same addresses. Two things were needed.
+
+### 1. `budget_fraction` on the private-skin operator
+
+`plan_private_skin()` sized each part's islands to fill **60% of a whole atlas**, correct
+for a lone part and hopeless when merging - five parts want 300% of one atlas and the
+merge ran out of space partway through the fourth. Now a parameter (default 0.6
+unchanged); pass roughly `0.55/N` when the parts will be merged.
+
+### 2. `tools/merge_private_skins.py`
+
+Repacks every per-part entry into one 256x4096 atlas, assigns unique ids, rewrites every
+face to the merged library in slot 0, and writes the matching `.RRI`. The palettes already
+match (each private skin borrows the same one), so no requantising - and the merge refuses
+outright if they ever differ rather than silently recolouring half the model.
+
+### Verified end to end, no GUI
+
+```
+tools/auto_skin.py            unwrap + private-skin all 5 parts   (headless Blender)
+tools/merge_private_skins.py  73 entries -> one library, 141 faces repointed, 0 skipped
+import the result             141 faces textured, 0 unresolved, no magenta
+```
+
+Settings used by `auto_skin.py`, all established by measurement: axis-aligned rotation,
+**Correct Aspect OFF** (the repacker treats UV space as square and does its own
+conversion - correcting twice gives 38 clamped islands against 13), 45 degree angle limit,
+zero island margin (`apply_private_skin` repacks with its own `margin_px=2`).
+
+### Gotchas worth keeping
+
+- `write_bmp8()` wants a numpy array in **bottom-up** row order; `read_bmp8`-style code
+  hands back top-down. Reversing is required or every merged atlas is upside down.
+- `FloatProperty` was missing from the add-on's `bpy.props` import - adding an operator
+  float property fails at module import until it is added.
+- **Never use Blender's Image > Save for a PE atlas.** It writes the image datablock's own
+  format regardless of the extension typed - a `.BMP` filename got a PNG inside it, 61 KB
+  instead of 1,026 KB. Only `File > Export > Panzer Elite Texture Atlas` writes the 8-bit
+  paletted BMP the game reads. A wrong-sized file in Explorer is the quickest tell.
