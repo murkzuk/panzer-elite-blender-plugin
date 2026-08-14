@@ -186,3 +186,32 @@ cells.
 bytes back because `apply_private_skin` sets loop UVs directly. That is true only within
 the session that writes them - a fresh *import* of the saved .RRF does read them, and did
 show the same smearing. The renders were of re-imported files all along.
+
+### Option 2 implemented (v0.56.0): a rectangle PER FACE
+
+Option 1 rendered crisp but left faces treading on each other: sharing an island's entry
+and then snapping each face to its bounding box makes adjacent triangles claim overlapping
+atlas pixels (a triangle's box is much larger than the triangle). **98 overlapping
+face-pairs** on a five-part Psw222 - so painting one face silently altered its neighbour.
+
+`plan_private_skin(..., per_face=True)` now treats every face as a one-face island, reusing
+the existing sizing, shelf-packing and writing paths unchanged.
+
+| | islands (v0.55.0) | per face (v0.56.0) |
+|---|---|---|
+| library entries | 73 | 141 |
+| axis-aligned rectangles | 141 / 141 | 141 / 141 |
+| **overlapping face pairs** | **98** | **0** |
+| atlas used | 39% | 42% |
+
+Barely more atlas for complete isolation, and it matches how stock PE content is authored.
+
+**The trade, stated plainly:** there are no continuous seams across a surface any more -
+texture cannot flow from one face into the next within the atlas. Painting must be done in
+the **3D viewport** (Texture Paint), where Blender projects the brush through each face's
+own UVs and a stroke crossing an edge paints both faces correctly; Blender's Bleed setting
+(~2px) covers the edges. Painting the flat atlas in the 2D image editor is not practical
+with per-face rectangles - it is 141 disconnected patches.
+
+`per_face` is an operator property, default **False**, so the island behaviour is
+unchanged for anyone who wants it. `tools/auto_skin.py` passes `per_face=True`.

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Panzer Elite RRF Importer",
     "author": "Jeff",
-    "version": (0, 55, 0),
+    "version": (0, 56, 0),
     "blender": (3, 6, 0),
     "location": "File > Import > Panzer Elite Model (.rrf), File > Export > Panzer Elite Texture Atlas (.bmp), Edit Mode mesh context menu > PE: Detach Face From Shared Texture Cell / PE: Write Vertex Positions / PE: Delete Face(s)",
     "description": "Import Panzer Elite (1999) .RRF model files: geometry, part hierarchy, pivots, gameplay attribute tags, and (optionally) UVs/texture from a matching .TLB texture library. Export a repainted texture atlas back out for re-use in the game, detach individual faces from a shared texture cell onto their own independent copy, write repositioned vertices back to the model's own .RRF (same-topology geometry edits), and delete faces with a real write-back (resizes the part and shifts every later part's file offsets accordingly).",
@@ -607,7 +607,7 @@ def pack_islands_shelf(sizes, grid_width=None, grid_height=None):
     return positions
 
 
-def plan_private_skin(bm, uv_layer, faces=None, budget_fraction=0.6):
+def plan_private_skin(bm, uv_layer, faces=None, budget_fraction=0.6, per_face=False):
     """Planning step for "give this part its own private, freely-paintable skin"
     (TODO.md): given a mesh that already has a real UV unwrap (e.g. Smart UV Project),
     works out everything needed to move it onto a brand-new, dedicated .TLB atlas -
@@ -625,7 +625,15 @@ def plan_private_skin(bm, uv_layer, faces=None, budget_fraction=0.6):
     # though the face count itself hasn't changed.
     bm.faces.ensure_lookup_table()
     faces = list(faces) if faces is not None else list(bm.faces)
-    islands = detect_uv_islands(bm, uv_layer, faces)
+    if per_face:
+        # One rectangle per FACE. Faces sharing an island overlap once each is snapped to
+        # its bounding box (98 overlapping pairs on a five-part Psw222), so painting one
+        # face alters its neighbour. Stock PE content gives every face its own rectangle;
+        # this matches it. Costs atlas space and gives up continuous seams across a
+        # surface - neither of which the format supported anyway.
+        islands = [[f.index if hasattr(f, "index") else f] for f in faces]
+    else:
+        islands = detect_uv_islands(bm, uv_layer, faces)
 
     bboxes = []
     for island in islands:
@@ -4436,6 +4444,16 @@ class MESH_OT_pe_give_private_skin(bpy.types.Operator):
     bl_label = "PE: Give This Part a Private Skin"
     bl_options = {"REGISTER", "UNDO"}
 
+    per_face: BoolProperty(
+        name="Rectangle Per Face",
+        description="Give every face its own atlas rectangle instead of sharing one per UV "
+                    "island. Islands overlap once faces are snapped to rectangles (which "
+                    "the format requires), so painting one face bleeds into its neighbour. "
+                    "Per-face costs atlas space and gives up continuous seams, and is how "
+                    "stock PE content is authored",
+        default=False,
+    )
+
     budget_fraction: FloatProperty(
         name="Atlas Budget",
         description="How much of the 256x4096 atlas this part may claim. Leave at 0.6 for "
@@ -4476,7 +4494,9 @@ class MESH_OT_pe_give_private_skin(bpy.types.Operator):
             self.report({"ERROR"}, "Mesh has no UV layer - unwrap it first (e.g. Smart UV Project)")
             return {"CANCELLED"}
 
-        plans, size_warnings = plan_private_skin(bm, uv_layer, budget_fraction=self.budget_fraction)
+        plans, size_warnings = plan_private_skin(bm, uv_layer,
+                                                budget_fraction=self.budget_fraction,
+                                                per_face=self.per_face)
         if not plans:
             self.report({"WARNING"}, "No faces to give a private skin")
             return {"CANCELLED"}

@@ -48,7 +48,7 @@ for ob in meshes:
         # Each part may claim only its share of the atlas, so the five private skins
         # can later be merged into ONE library. The default 0.6 assumes the part owns the
         # whole atlas, which overflows the merge five times over.
-        res = bpy.ops.mesh.pe_give_private_skin(budget_fraction=BUDGET)
+        res = bpy.ops.mesh.pe_give_private_skin(budget_fraction=BUDGET, per_face=True)
         status = str(res)
     except Exception as exc:
         status = "FAILED: %s" % exc
