@@ -86,3 +86,48 @@ plain gradient) instead of a checkerboard, cheap and fast, would confirm or rule
 this reframing directly; (b) if genuinely still a problem with realistic textures too,
 the real fix is re-seaming the worst non-rectangular faces in Blender so they're closer
 to true rectangles - a mesh-topology change, not a writer change.
+
+---
+
+## SOLVED (diagnosis): the private-skin stretching is non-rectangular UVs
+
+The long-parked "private-skin texture stretches on non-rectangular faces, possibly
+unfixable" is now measured rather than guessed, using the labelled UV grid.
+
+Same merged model, same library, rendered both ways: **Blender shows crisp labelled cells;
+ObjEdit smears them into streaks.** Auditing the UV corners explains it exactly:
+
+| model | textured faces | axis-aligned rectangles | non-rectangular |
+|---|---|---|---|
+| stock `Psw222.RRF` | 137 | **137 (100%)** | 0 |
+| our private-skin merge | 141 | 46 (33%) | **95 (67%)** |
+
+**Every face in real PE content is an axis-aligned rectangle - all 137, no exceptions.**
+Smart UV Project produces islands whose faces are not, and the engine cannot represent
+them: it reduces a face to origin+size and stretches the crop across it. Blender
+interpolates the four corners properly, which is why it looks right there and only there.
+
+So this was never an engine bug or an interpolation subtlety. **The format simply cannot
+express a non-rectangular face mapping**, and the private-skin path has been feeding it
+exactly that.
+
+### The fix direction
+
+`plan_private_skin`/`apply_private_skin` must give every face an **axis-aligned rectangle**,
+not an island-relative UV polygon - i.e. do what stock content does. Two options:
+
+1. **Snap to bounding box** - keep the island packing, but write each face's UV bbox
+   corners rather than its true corners. Cheap; slightly distorts faces whose unwrapped
+   shape is not a rectangle, but renders correctly in-engine.
+2. **A rectangle per face** - allocate each face its own atlas rectangle sized to its real
+   proportions, exactly as stock content is authored. More atlas pressure, no distortion,
+   and no seams shared between faces.
+
+Option 1 is a small change and testable immediately with the grid: re-audit should read
+100% rectangular, and ObjEdit's render should go crisp. Option 2 is the faithful one.
+
+### Test that proves it either way
+
+The labelled grid (`tools/uvtest/make_uvtest.py`, or `tools/merge_private_skins.py` +
+`grid_into.py`) makes this a one-look check: crisp readable cells in ObjEdit means the
+mapping is expressible; streaks mean it is not.
