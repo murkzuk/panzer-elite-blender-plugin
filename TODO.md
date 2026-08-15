@@ -1,6 +1,8 @@
 # TODO / Backlog
 
-Running list of things flagged during work sessions, not yet done. Newest first.
+Running list of things flagged during work sessions, not yet done. Newest first -
+but entries can go stale: the authoritative current state is the
+"STATE AT ... START HERE" section nearest the bottom.
 
 ---
 
@@ -27,31 +29,32 @@ Running list of things flagged during work sessions, not yet done. Newest first.
   before resolving the `.RRI`, so put the library in OE_2's Texture folder or use an
   absolute path.
 
-- [ ] **START HERE on texture work: [docs/TEXTURE_PIPELINE_FINDINGS.md](docs/TEXTURE_PIPELINE_FINDINGS.md)**
-  consolidates everything established about the texture pipeline as of 2026-08-13, split
-  into settled (with the source function or sample size behind each fact) and open. Read
-  it before re-deriving anything.
+- [x] **RESOLVED 2026-08-14 (v0.61.0): how a face's texture coordinates are derived.**
+  This entry and the two below predate the v0.42-v0.61 sequence and were left unticked;
+  they are done. Confirmed end to end by the two-angle F orientation test (ObjEdit and
+  Blender agree on every marker) - see "STATE AT 2026-08-14 (v0.61.0) - START HERE" at the
+  bottom of this file. Summary of what settled it:
 
-  Settled and shipped: the texture-id encoding including the 32-library extension
-  (Tigers 35%->100% resolved), slot-correct library selection, atlas/entry geometry, the
-  three .TLB size variants, and the .TLB palette layout.
+  - Corner fields are origin+size, not four positions (v0.42.0).
+  - The crop origin is `textureOfset` bits 16-23, in 16px units (v0.43.0).
+  - Palette index 0 is the transparent key, the index not the colour (v0.44.0).
+  - A face's crop lives in THREE places and all must be written: corner fields,
+    `materialInfo` bits 8-15, `textureOfset` bits 24-30 (v0.60.0).
+  - `v1` = the crop's top-LEFT, proven by the F orientation test (v0.61.0).
 
-  **Open: how a face's texture coordinates are derived.** Every face on the Italy Tiger
-  has zero corner bytes and near-zero attribVList, 4,256 faces share two entries, and the
-  obvious crop reading predicts atlas regions outside the entry itself (13-22% fit). The
-  renderer computes tu/tv inside OBJHALX5.dll, whose source is in none of the archives.
+  The checkerboard experiment below is no longer needed for this question.
 
-  **Next action**: the checkerboard experiment is already built -
-  `Italy_Obj/Tiger1_ChkTest.RRF` + `.RRI` with `Texture/ChkTest.TLB`/`ChkTest_8.BMP` (a
-  real entry table over a labelled 32px grid). It loaded untextured on the first try
-  because ObjEdit `chdir(maindir)`s before resolving the .RRI, so `texture\ChkTest.TLB`
-  resolved against ObjEdit's own folder. Fix by placing the library where ObjEdit looks or
-  using an absolute path in the .RRI, then read the grid labels off a face.
-
-- [ ] **NEXT: per-face texture ORIENTATION (the remaining piece).** Live lead: Blender reverses the winding on 27/380 faces at import, concentrated in Main_Gun. See the OPEN section of docs/TEXTURE_PIPELINE_FINDINGS.md for what is already ruled out.
-- [ ] **PARTLY SOLVED: how face texture coordinates are actually derived.** Crop origin bits fixed v0.43.0, colour key fixed v0.44.0. The "jumbled
+- [x] **RESOLVED (v0.45.0, confirmed v0.61.0): per-face texture ORIENTATION.** The
+  27/380 reversed windings on Sdkfz184 were Blender's own `_recalculate_normals()` flipping
+  faces whose normals disagreed with their neighbours, concentrated in Main_Gun. Fixed by
+  binding each texture corner to the file's vertex index rather than the loop's position.
+  Full write-up in the SOLVED 2026-08-13 section of
+  [docs/TEXTURE_PIPELINE_FINDINGS.md](docs/TEXTURE_PIPELINE_FINDINGS.md).
+- [x] **RESOLVED: how face texture coordinates are actually derived.** Crop origin bits fixed v0.43.0, colour key fixed v0.44.0. The "jumbled
   textures" symptom is NOT fixed, and the crop-rectangle model previously recorded in
-  RRF_FORMAT.md is now known to be wrong. Written up in full there; the short version:
+  RRF_FORMAT.md is now known to be wrong. (Historical entry from before the v0.42-v0.61
+  fixes - see the RESOLVED note above; the symptom was subsequently fixed.) The short
+  version of the state as it was then:
 
   On a real Italy Tiger every one of 4,785 faces has all-zero corner bytes, `attribVList`
   is 96.6% zero, and 4,256 faces share just two entries with identical size and origin -
