@@ -1014,9 +1014,17 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 
 ## STATE AT 2026-08-14 (v0.61.0) - START HERE
 
-### The one thing outstanding
+### CONFIRMED 2026-08-14: ObjEdit and Blender agree
 
-**Does v0.61.0 make ObjEdit and Blender agree?** It flipped `v1` from top-right to
+The user compared both tools at two angles (side and top) with the F orientation test.
+Every marker matches - F glyphs upright and rotated identically, red origin blocks in the
+same corners, green top bars on the same edges. **v0.61.0 was the last systematic error.**
+
+The mapping is correct end to end: model in Blender, per-face private skin, merge, paint,
+export, and the engine draws what Blender shows. Painting real artwork is now the task,
+not format work.
+
+### (resolved) Did v0.61.0 make ObjEdit and Blender agree? It flipped `v1` from top-right to
 top-LEFT after the F test showed ObjEdit drawing the glyph upright and Blender drawing it
 backwards. The rebuilt files are in place but the user has not looked since:
 
