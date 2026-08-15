@@ -1011,3 +1011,64 @@ Running list of things flagged during work sessions, not yet done. Newest first.
 - [ ] **Some texture placement issues still being tracked down.** Reported after the
   geometry/pivot fixes landed — "model is now accurate" but "still some odd texture
   issues." Not yet reproduced with a specific screenshot/model to diagnose.
+
+## STATE AT 2026-08-14 (v0.61.0) - START HERE
+
+### The one thing outstanding
+
+**Does v0.61.0 make ObjEdit and Blender agree?** It flipped `v1` from top-right to
+top-LEFT after the F test showed ObjEdit drawing the glyph upright and Blender drawing it
+backwards. The rebuilt files are in place but the user has not looked since:
+
+```
+K:\petest\Psw222_merged.RRF     open in ObjEdit (library already in OE_2\Texture)
+K:\petest\merged.blend          same model in Blender
+```
+
+Compare the F glyphs. Upright and matching in both = the mapping is finally correct and
+painting can begin. If they still differ, the remaining variable is the corner ORDER
+(rotation), not the mirror - four pre-built variants sit at `K:\petest\Rot0..3.RRF`.
+
+### The working pipeline (all headless, no GUI needed)
+
+```
+tools/auto_skin.py            unwrap + per-face private skin, budget split by surface area
+tools/merge_private_skins.py  N per-part libraries -> one, faces repointed, .RRI written
+tools/uvtest/orient_test.py   per-face F + red origin corner + green top edge
+tools/uvtest/grey_base.py     flat panzer grey + a 216-colour painting palette
+scratchpad/export_atlas.py    painted .blend -> 8-bit paletted BMP the game reads
+```
+
+Current numbers on a five-part Psw222: 141 faces, 141 axis-aligned rectangles, 141/141
+crop encodings agreeing, 0 overlapping faces, 0 unresolved, worst aspect mismatch 1.84x
+(stock PE is 21.57x).
+
+### Format facts nailed down today - do not re-derive
+
+- A face's crop lives in **three** places and all must be written: the corner fields
+  (origin+size, NOT positions), `materialInfo` bits 8-15 (size in 16px units), and
+  `textureOfset` bits 24-30 (origin in 16px units). Writing only the corners leaves the
+  renderer using a stale crop - that was the "disjointed line".
+- **`v1` = the crop's top-LEFT** (v2 top-right, v3 bottom-right, textureHalf bottom-left).
+  `rrSetTexture()`'s write order suggests top-right; the HAL that draws disagrees.
+- **Palette index 0 is the transparent key** - the index, not the colour. Stock atlases set
+  it to white and fill 10-84% of the sheet with it.
+- Stock content is **100% axis-aligned rectangles**; the format cannot express anything else.
+- Blender's Image>Save writes the datablock's own format regardless of extension - only the
+  add-on's atlas exporter produces the 8-bit paletted BMP. A 61 KB "BMP" is a PNG.
+- An atlas image must be **packed** into the .blend or paint is lost on save.
+
+### Method note that cost the most time
+
+Three separate checks passed while the file was wrong, because each compared the add-on
+against itself: bounding boxes (a mirror passes), per-vertex corners (reader and writer
+shared the same wrong convention), and round-tripping (proves reversibility, not
+correctness). **Orientation needs an asymmetric marker rendered by the real tool.** That is
+what the F test is for.
+
+### Correction worth carrying forward
+
+I twice told the user a defect was an unfixable engine limitation - the "private-skin
+stretching" and the "disjointed line". Both were our own bugs, found by measuring further.
+Stock PE has straight panel lines and fine detail in this same format, so that is the
+standard to hold the pipeline to.
